@@ -4,6 +4,7 @@ from threading import RLock
 from uuid import uuid4
 import os
 import json
+import time
 from datetime import datetime, timezone
 
 from src.models import TravelCase
@@ -46,7 +47,10 @@ def _write_lock():
 
 def _read_book():
     try:
-        raw=json.loads(CASE_FILE.read_text(encoding="utf-8"))
+        # On Windows an open reader can deny the writer's atomic replace.
+        with _LOCK:
+            text=CASE_FILE.read_text(encoding="utf-8")
+        raw=json.loads(text)
     except FileNotFoundError:
         return {"format":"case_book_v1","current_id":None,"cases":{},"visits":{}}
     if raw.get("format")=="case_book_v1":
@@ -61,7 +65,15 @@ def _write_book(book):
     temporary=CASE_FILE.with_name(f"current_case_{uuid4().hex}.tmp")
     try:
         temporary.write_text(json.dumps(book,ensure_ascii=False,indent=2,allow_nan=False),encoding="utf-8")
-        temporary.replace(CASE_FILE)
+        for attempt in range(5):
+            try:
+                temporary.replace(CASE_FILE)
+                break
+            except PermissionError as exc:
+                # Another local process can briefly have the file open.
+                if getattr(exc, "winerror", None) not in {5, 32} or attempt == 4:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
     finally:
         temporary.unlink(missing_ok=True)
 

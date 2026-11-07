@@ -8,7 +8,39 @@
 
 命名约定：项目经理负责单个订单的需求、协调、交付与异常处理；公司层面的经营分析与财务职能使用“经营 Agent”称呼，属于后续讨论的独立职能角色。当前没有新增经营 Agent，财务金额仍由程序核算。内部角色字段 `manager` 保留，历史任务日志保留原始称呼；旧档案读取时识别为同一项目经理岗位。
 
-## 启动
+## React 双端演示
+
+用户端和老板端通过同一个本地 Python 服务读取案件、模拟预订和账本。用户端的未提交草稿保存在当前浏览器。提交后的「我的活动」使用浏览器会话读取后端记录。老板端登录使用本地演示口令。
+
+在项目根目录安装 Python 依赖，然后构建两个前端。
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+npm.cmd --prefix frontend/customer ci
+npm.cmd --prefix frontend/customer run build
+npm.cmd --prefix frontend/boss ci
+npm.cmd --prefix frontend/boss run build
+```
+
+已经安装前端依赖时，也可以直接用 Node 运行各自目录的 `node_modules/vite/bin/vite.js build`。策划使用项目已有的 `LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_MODEL` 设置。
+
+```powershell
+$env:MIYOU_OWNER_PASSWORD = Read-Host '设置本次演示的老板口令'
+.\.venv\Scripts\python.exe -m uvicorn src.web_api:app --host 127.0.0.1 --port 8000
+```
+
+- 用户端打开 [咪游社](http://127.0.0.1:8000/)。创建北京 15 人、1 天、人均 700 元的活动，日期选未来一天，确认后跟随 AI 工作台的步骤。
+- 方案确认后查询午餐报价，选择一条可用报价，确认合同条件并支付模拟预付款。
+- 老板端打开 [老板工作台](http://127.0.0.1:8000/boss/)，输入本次口令。从「待审批」进入同一案件，授权模拟供方定金，再提交模拟预订。
+- 回用户端查看回执、确认交付并支付模拟尾款。回老板端授权结清，最后查看「经营复盘」。
+
+两个入口设计为同一台电脑本地演示。测试使用临时案件与账本，并以固定模型响应跑通流程。
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_web_order.py -v
+```
+
+## Streamlit 调试入口
 
 在 PowerShell 中运行：
 

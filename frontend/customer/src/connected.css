@@ -1,0 +1,16 @@
+.connected-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 16px; margin: 18px 0; }
+.connected-panel { display: block; margin: 16px 0; padding: clamp(16px, 3vw, 28px); background: #fffdf8; border: 1px solid #dddcd0; border-radius: 16px; }
+.connected-grid .connected-panel { margin: 0; }
+.connected-panel h2, .connected-panel h3 { margin: 0 0 12px; }
+.connected-panel li { margin: 8px 0; line-height: 1.55; }
+.connected-panel label { display: block; margin: 10px 0; }
+.connected-panel textarea, .connected-panel select, .connected-panel input[type=number] { display: block; width: 100%; margin: 6px 0; padding: 10px; font: inherit; color: inherit; border: 1px solid #a2ab91; border-radius: 8px; }
+.connected-panel fieldset { margin: 16px 0; padding: 12px; border: 1px solid #dddcd0; border-radius: 8px; }
+.connected-panel .connected-option { display: flex; gap: 10px; align-items: start; padding: 8px; }
+.connected-option small { display: block; margin-top: 4px; }
+.connected-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 14px 0; }
+.connected-error { color: #8e2924; padding: 12px; border-radius: 8px; background: #faeae4; }
+.connected-case-id { margin: 8px 0 16px; color: #56654d; font-size: .85rem; }
+.activity-link { color: inherit; text-decoration: none; }
+.activity-link:hover { border-color: #658353; }
+.event-city { display: block; margin-top: 12px; }

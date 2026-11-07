@@ -4,4 +4,7 @@ __pycache__/
 *.py[cod]
 data/
 .idea/
+frontend/**/node_modules/
+frontend/**/dist/
+frontend/.pnpm-store/
 

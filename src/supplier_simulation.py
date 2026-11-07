@@ -301,9 +301,9 @@ def contract(order,ids=None,check_valid=True):
         "signature":signature({"quotes":[q.model_dump(mode="json") for q in selected],"fee":order.service_fee_cents})}
 
 
-def select_quotes(order_id,ids):
+def select_quotes(order_id,ids,*,expected_revision=None):
     with transaction() as tx:
-        order,revision=_load(tx,order_id)
+        order,revision=_load(tx,order_id,expected_revision)
         if order.confirmations or order.supplier_paid_cents:
             raise ValueError("已付款给供应商或已预订，变更需单独处理，不可覆盖原订单")
         summary=contract(order,ids)
@@ -317,11 +317,11 @@ def select_quotes(order_id,ids):
     return order
 
 
-def confirm_contract(order_id,accepted_conditions,actor="customer",expected_signature=None):
+def confirm_contract(order_id,accepted_conditions,actor="customer",expected_signature=None,*,expected_revision=None):
     if actor!="customer":
         raise ValueError("服务条件必须由客户确认，老板不能代替")
     with transaction() as tx:
-        order,revision=_load(tx,order_id)
+        order,revision=_load(tx,order_id,expected_revision)
         if order.status not in {"waiting_customer","customer_confirmed","paid"}:
             raise ValueError("当前没有待客户确认的合同")
         summary=contract(order)
@@ -336,11 +336,11 @@ def confirm_contract(order_id,accepted_conditions,actor="customer",expected_sign
     return order
 
 
-def pay_customer_deposit(order_id,coupon_id=None,actor="customer",expected_signature=None):
+def pay_customer_deposit(order_id,coupon_id=None,actor="customer",expected_signature=None,*,expected_revision=None):
     if actor!="customer":
         raise ValueError("预付款需客户明确操作")
     with transaction() as tx:
-        order,revision=_load(tx,order_id)
+        order,revision=_load(tx,order_id,expected_revision)
         if order.confirmations:
             if coupon_id!=order.coupon_id:
                 raise ValueError("已有付款不能改用另一张优惠券")
@@ -367,10 +367,10 @@ def pay_customer_deposit(order_id,coupon_id=None,actor="customer",expected_signa
     return order
 
 
-def pay_supplier_deposit(order_id,actor,expected_signature=None):
+def pay_supplier_deposit(order_id,actor,expected_signature=None,*,expected_revision=None):
     owner_only(actor)
     with transaction() as tx:
-        order,revision=_load(tx,order_id)
+        order,revision=_load(tx,order_id,expected_revision)
         if order.confirmations:
             return order
         summary=contract(order)
@@ -387,9 +387,9 @@ def pay_supplier_deposit(order_id,actor,expected_signature=None):
     return order
 
 
-def fulfill_bookings(order_id):
+def fulfill_bookings(order_id,*,expected_revision=None):
     with transaction() as tx:
-        order,revision=_load(tx,order_id)
+        order,revision=_load(tx,order_id,expected_revision)
         if order.confirmations:
             return order
         summary=contract(order)
@@ -433,11 +433,11 @@ def simulate_change(order_id,kind="expire"):
     return order
 
 
-def finish_service(order_id,actor="customer"):
+def finish_service(order_id,actor="customer",*,expected_revision=None):
     if actor!="customer":
         raise ValueError("交付需客户确认")
     with transaction() as tx:
-        order,revision=_load(tx,order_id)
+        order,revision=_load(tx,order_id,expected_revision)
         if order.status not in {"confirmed","delivered","completed"}:
             raise ValueError("资源尚未确认，不能完成服务")
         if order.status=="completed":
@@ -457,10 +457,10 @@ def finish_service(order_id,actor="customer"):
     return order
 
 
-def settle_suppliers(order_id,actor):
+def settle_suppliers(order_id,actor,*,expected_revision=None):
     owner_only(actor)
     with transaction() as tx:
-        order,revision=_load(tx,order_id)
+        order,revision=_load(tx,order_id,expected_revision)
         if order.status=="completed":
             return order
         if not order.delivered or order.status!="delivered":
