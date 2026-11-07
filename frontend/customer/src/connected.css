@@ -13,4 +13,7 @@
 .connected-case-id { margin: 8px 0 16px; color: #56654d; font-size: .85rem; }
 .activity-link { color: inherit; text-decoration: none; }
 .activity-link:hover { border-color: #658353; }
+.plan-detail-link { margin-top: 16px; border-color: var(--green); text-decoration: none; }
 .event-city { display: block; margin-top: 12px; }
+.connected-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
+.connected-panel input:not([type=checkbox]) { max-width: 100%; }

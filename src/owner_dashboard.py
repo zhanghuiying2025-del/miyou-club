@@ -65,9 +65,9 @@ def _company_snapshot():
         )
 
 
-def _activity_flow(case):
+def _activity_flow(case, *, tracking=False):
     demo = case.journey_demo
-    if not (activity_order.TRACKING_ENABLED and demo):
+    if not ((tracking or activity_order.TRACKING_ENABLED) and demo):
         return None
     event = pending_event(demo)
     if demo.status == "awaiting_owner" and event and event.response:
@@ -76,6 +76,9 @@ def _activity_flow(case):
         return "待客户确认活动调整", "客户", event.description if event else "", False
     if demo.status == "awaiting_agent":
         return "活动异常处理中", "团队", event.description if event else "", False
+    if tracking and demo.status in {"ready", "running", "held", "paused"}:
+        stage = {"ready": "活动待开始", "running": "活动进行中", "held": "活动暂停", "paused": "活动暂停"}[demo.status]
+        return stage, "客户", event.description if event else "", False
     return None
 
 
@@ -149,7 +152,9 @@ def _supplier_flow(order, case=None):
     return "酒店餐饮询价中", "履约执行", "", False
 
 
-def _case_flow(case, supplier):
+def _case_flow(case, supplier, *, tracking=False):
+    if tracking and (activity := _activity_flow(case, tracking=True)):
+        return activity
     if case.service_mode == "document_intake":
         return "待客户补齐文档信息", "客户", case.error_message or "", False
     if case.service_mode == "activity_review":
@@ -289,7 +294,7 @@ def _tasks_for(row, entity_id, records):
         tasks.append(_task_row(
             row, actor, record.get("task") or "业务任务", status, detail, record.get("source", ""),
             elapsed, sender=record.get("sender", ""), expected_result=record.get("expected_result", ""),
-            input_summary=record.get("input_summary", ""),
+            input_summary=record.get("input_summary", ""), created_at=record.get("created_at"),
         ))
     for job in jobs:
         default_actor, title = _JOB_LABELS.get(job.key[0], ("团队", "后台任务"))
@@ -382,7 +387,7 @@ def _supplier_results(orders, leads, campaigns, cash):
     return metrics, campaign_rows, rows
 
 
-def load_owner_dashboard():
+def load_owner_dashboard(*, activity_tracking=False):
     """Summarize real saved demo records and current jobs without changing business state."""
     cases = [TravelCase.model_validate(row["case"]) for row in sorted(
         storage.saved_case_snapshots(), key=lambda row: row.get("updated_at", ""), reverse=True
@@ -405,9 +410,10 @@ def load_owner_dashboard():
                 and not (case.procurement_order or case.journey_demo)):
             supplier = supplier_by_case.get(case.id)
         row = _order_row(
-            "case", case.id, _case_title(case), _case_flow(case, supplier),
+            "case", case.id, _case_title(case), _case_flow(case, supplier, tracking=activity_tracking),
             case_id=case.id, supplier_order_id=supplier.id if supplier else None,
         )
+        row["case_status"] = case.status.value
         if case.procurement_order:
             row["procurement_order_id"] = case.procurement_order.id
             if any(p.kind in {"customer_deposit", "customer_balance"} and p.amount_yuan > 0

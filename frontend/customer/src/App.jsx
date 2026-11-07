@@ -4,6 +4,7 @@ import { blankBrief, goals, stepTitles, examples, money, totalBudget, profileOf,
 import { readDraft, saveDraft } from './storage.js';
 import { customerApi, workspaceUrl } from './api.js';
 import { ActivityList, ActivityWorkspace } from './Connected.jsx';
+import { Offers, UploadDocuments } from './Features.jsx';
 
 const ROBOT = '/assets/miyo-robot.png';
 const HERO_ROBOT = '/assets/miyo-hero-robot.png';
@@ -46,6 +47,7 @@ function Header({ active, createMode, step, onExit, onStart }) {
       <button className="mobile-menu icon-button" aria-label={menuOpen ? '关闭导航' : '打开导航'} aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X size={24} /> : <List size={24} />}</button>
       <nav aria-label="主导航" className={menuOpen ? 'nav-open' : ''}>
         {[['/', '首页', 'home'], ['/cases', '案例演示', 'cases'], ['/about', '关于我们', 'about']].map(([to, label, id]) => <Link key={id} to={to} className={`nav-link ${active === id ? 'active' : ''}`} aria-current={active === id ? 'page' : undefined} onClick={() => setMenuOpen(false)}>{label}</Link>)}
+        <Link className="nav-link" to="/documents" onClick={() => setMenuOpen(false)}>上传资料</Link><Link className="nav-link" to="/offers" onClick={() => setMenuOpen(false)}>咨询与优惠</Link>
         <Link className="button button-small login-button" to="/activities" onClick={() => setMenuOpen(false)}>我的活动 <ArrowUpRight size={18} /></Link>
       </nav>
     </>}
@@ -102,13 +104,13 @@ function Wizard({ step, brief, update, onExit, onReview }) {
     <div className="wizard-bottom"><button className="text-button" onClick={() => step === 1 ? onExit() : navigate(`/create/${step - 1}`)}><ArrowLeft size={19} />{step === 1 ? '返回首页' : '上一步'}</button><span>{String(step).padStart(2, '0')} <span>/</span> 06</span></div>
   </div>;
 }
-function Review({ brief, onExit, onGenerate, busy, error }) {
+function Review({ brief, onExit, onGenerate, onFiles, busy, error }) {
   const p = profileOf(brief);
   const eventCity = brief.eventCity.trim() || brief.city;
   const fields = [
     ['活动名称', brief.name.trim() || '还没有名字的好活动', 1, PencilSimple], ['参与团队', `${brief.people} 人 · ${brief.team}`, 2, UsersThree], ['活动地点', `${brief.city}出发 · ${eventCity} · ${p.place}`, 3, MapPin], ['时间安排', `${brief.flexible ? brief.date + '（可协商）' : brief.date} · ${brief.duration}`, 4, CalendarBlank], ['预算范围', `¥${money(brief.budget)} / 人 · 共 ¥${money(totalBudget(brief))}`, 5, Coins], ['活动偏好', p.focus, 6, Sparkle],
   ];
-  return <div className="wizard-page review-page"><Header createMode step={6} onExit={onExit} /><main className="review-shell"><img className="review-robot" src={ROBOT} alt="正面咪游机器人" /><p className="eyebrow">很高兴，更了解你们了</p><h1 className="display-heading">这次相聚，我了解了。</h1><p className="section-description">确认一下，接下来交给我们的 AI 团队。</p><div className="profile-review">{fields.map(([label, value, step, Icon]) => <button key={label} className="review-field" onClick={() => navigate(`/create/${step}`)}><Icon size={23} /><span><small>{label}</small><strong>{value}</strong></span><PencilSimple size={17} className="review-edit" /></button>)}</div>{brief.notes && <p className="special-note"><strong>特别记下了：</strong>{brief.notes}</p>}<button className="button generate-button" disabled={busy} onClick={onGenerate}>{busy ? "正在提交…" : "让 AI 团队开始策划"} <Sparkle size={23} /></button><p className="wizard-footnote">查看团队给出的方案，再确认安排。</p>{error && <p className="connected-error" role="alert">{error}</p>}</main><div className="wizard-bottom"><Link className="text-button" to="/create/6"><ArrowLeft size={19} />返回修改</Link><span>需求确认</span></div></div>;
+  return <div className="wizard-page review-page"><Header createMode step={6} onExit={onExit} /><main className="review-shell"><img className="review-robot" src={ROBOT} alt="正面咪游机器人" /><p className="eyebrow">很高兴，更了解你们了</p><h1 className="display-heading">这次相聚，我了解了。</h1><p className="section-description">确认一下，接下来交给我们的 AI 团队。</p><div className="profile-review">{fields.map(([label, value, step, Icon]) => <button key={label} className="review-field" onClick={() => navigate(`/create/${step}`)}><Icon size={23} /><span><small>{label}</small><strong>{value}</strong></span><PencilSimple size={17} className="review-edit" /></button>)}</div>{brief.notes && <p className="special-note"><strong>特别记下了：</strong>{brief.notes}</p>}<label className="connected-panel">参考附件（可选，最多 3 份）<input type="file" accept=".pdf,.docx,image/jpeg,image/png,image/gif,image/webp" multiple onChange={event => onFiles(Array.from(event.target.files))} /></label><button className="button generate-button" disabled={busy} onClick={onGenerate}>{busy ? "正在提交…" : "让 AI 团队开始策划"} <Sparkle size={23} /></button><p className="wizard-footnote">查看团队给出的方案，再确认安排。</p>{error && <p className="connected-error" role="alert">{error}</p>}</main><div className="wizard-bottom"><Link className="text-button" to="/create/6"><ArrowLeft size={19} />返回修改</Link><span>需求确认</span></div></div>;
 }
 function Cases({ onStart, onUseCase }) {
   return <div className="inner-page"><Header active="cases" onStart={onStart} /><main className="content-shell cases-shell"><p className="eyebrow">相聚的灵感，从这里开始</p><div className="section-title-row"><h1 className="display-heading">好活动，可以有很多种。</h1><span className="quiet-label">以下均为演示案例</span></div><p className="section-description">选一个喜欢的方向，把它变成你们自己的故事。</p><div className="case-list">{examples.map((item) => { const Icon = icons[item.icon]; return <article key={item.id} className={`case-row case-${item.id}`}><div className="case-number">{item.number}<Icon size={58} weight="thin" /></div><div className="case-content"><span className="small-tag">{item.tag}</span><h2>{item.name}</h2><p>{item.description}</p><div className="case-meta"><span><MapPin />{item.city}</span><span><UsersThree />{item.people}人</span><span><Clock />{item.duration}</span><span>人均 ¥{money(item.budget)}</span></div></div><button className="round-link" aria-label={`以${item.label}为灵感创建活动`} onClick={() => onUseCase(item)}><ArrowUpRight size={28} /></button><button className="case-use-link text-button" onClick={() => onUseCase(item)}>以此为灵感 <ArrowRight size={17} /></button></article>; })}</div><div className="bottom-callout"><span>还没有灵感？让咪游和你一起想。</span><button className="text-button green-text" onClick={onStart}>开始聊聊 <ArrowRight size={22} /></button></div></main><Footer /></div>;
@@ -137,6 +139,7 @@ export function App() {
   const [dialog, setDialog] = useState(null);
   const [storageError, setStorageError] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [files, setFiles] = useState([]);
   const [submitError, setSubmitError] = useState('');
   const stepMatch = route.match(/^\/create\/(\d+)$/);
   const step = stepMatch ? Number(stepMatch[1]) : null;
@@ -170,6 +173,7 @@ export function App() {
       duration: example.duration, goals: example.goals } : blankBrief();
     const id = crypto.randomUUID();
     setBrief(next);
+    setFiles([]);
     setRequestId(id);
     persist(next, 1, id);
     setDialog(null);
@@ -197,14 +201,20 @@ export function App() {
     setSubmitting(true);
     setSubmitError('');
     try {
-      const activity = await customerApi('/customer/activities', {
-        body: { request_id: requestId, brief: { ...brief, name: brief.name.trim() || '未命名团建',
-          event_city: brief.eventCity.trim() || brief.city.trim(), people: Number(brief.people),
-          budget: Number(brief.budget) } },
-      });
+      const payload = { request_id: requestId, brief: { ...brief, name: brief.name.trim() || '未命名团建',
+        event_city: brief.eventCity.trim() || brief.city.trim(), people: Number(brief.people), budget: Number(brief.budget) } };
+      if (files.length > 3) throw new Error('最多上传 3 份参考附件。');
+      let body = payload;
+      if (files.length) {
+        body = new FormData();
+        body.set('payload', JSON.stringify(payload));
+        files.forEach(file => body.append('files', file));
+      }
+      const activity = await customerApi('/customer/activities' + (files.length ? '/with-files' : ''), { body });
       setDraft(null);
       setStorageError(!saveDraft(null));
       setBrief(blankBrief());
+      setFiles([]);
       setRequestId(crypto.randomUUID());
       navigate(workspaceUrl(activity.id));
     } catch (error) {
@@ -218,9 +228,11 @@ export function App() {
   if (route === '/') page = <Home onStart={onStart} />;
   else if (route === '/cases') page = <Cases onStart={onStart} onUseCase={start} />;
   else if (route === '/about') page = <About onStart={onStart} />;
+  else if (route === '/documents') page = <><Header onStart={onStart} /><UploadDocuments onCreated={navigate} /></>;
+  else if (route === '/offers') page = <><Header onStart={onStart} /><Offers /></>;
   else if (route === '/activities') page = <><Header onStart={onStart} /><ActivityList draft={draft} onStart={onStart} /></>;
   else if (step >= 1 && step <= 6) page = <Wizard step={step} brief={brief} update={update} onExit={exit} onReview={() => navigate('/create/review')} />;
-  else if (route === '/create/review') page = <Review brief={brief} onExit={exit} onGenerate={generate} busy={submitting} error={submitError} />;
+  else if (route === '/create/review') page = <Review brief={brief} onExit={exit} onGenerate={generate} onFiles={setFiles} busy={submitting} error={submitError} />;
   else if (activityMatch) page = <><Header onStart={onStart} /><ActivityWorkspace key={route} id={activityMatch[2]} planId={activityMatch[3]} planList={activityMatch[1] === 'activities'} /></>;
   else if (route === '/create') page = <div className="route-loading" />;
   else page = <NotFound onStart={onStart} />;

@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 
 export async function api(path, { body, signal } = {}) {
+  const isForm = body instanceof FormData;
   const response = await fetch('/api' + path, {
     signal,
     ...(body === undefined ? {} : {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: isForm ? undefined : { 'Content-Type': 'application/json' },
+      body: isForm ? body : JSON.stringify(body),
     }),
   });
   const payload = await response.json().catch(() => null);

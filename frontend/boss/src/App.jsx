@@ -4,16 +4,22 @@ import {
   Coins, House, Layers, Menu, RefreshCw, Search, ShieldCheck, TriangleAlert, UserRound, UsersRound,
 } from 'lucide-react';
 import { api, money, useResource } from '../../shared/api.js';
+import { Archive, Exceptions, Lessons, Operations, OrderExtras } from './Features.jsx';
 import './connected.css';
 
 const navigation = [
   ['', '经营总览', House], ['approvals', '待审批', ClipboardCheck], ['orders', '订单与风险', Layers],
   ['team', 'AI 员工', UsersRound], ['review', '经营复盘', ChartNoAxesCombined],
+  ['errors', '运行异常', CircleX], ['archive', '历史订单', Layers],
+  ['lessons', '反馈经验', ClipboardCheck], ['operations', '公司运营', Coins],
   ['rules', '公司制度', ShieldCheck],
 ];
 const actionLabels = {
   approve_plan: '批准方案', reject_plan: '退回方案', authorize_deposit: '授权模拟供方定金',
   submit_booking: '提交模拟预订并获取回执', settle: '授权结清供方并完成本单',
+  retry: '从这里继续处理', retry_document: '重新读取资料', review_document: '继续审核活动方案',
+  retry_incident: '继续处理现场问题', approve_incident: '批准调整，交组织者确认',
+  hold_incident: '暂不批准，保持暂停', reopen_incident: '重新核查暂停事件',
 };
 const taskLabels = { running: '进行中', completed: '已完成', failed: '失败', interrupted: '中断' };
 const exception = task => ['failed', 'interrupted'].includes(task.status);
@@ -77,7 +83,10 @@ export function App() {
           {page.section === 'orders' && (page.key ? <OrderDetail key={page.key} orderKey={page.key} refreshDashboard={dashboard.refresh} />
             : <OrderList rows={data.orders} search empty="没有找到订单。" />)}
           {page.section === 'team' && <TaskList rows={data.tasks} empty="目前还没有 AI 团队任务。" />}
-          {page.section === 'errors' && <TaskList rows={problems} empty="当前没有运行异常。" />}
+          {page.section === 'errors' && <Exceptions tasks={problems} orders={data.orders} allTasks={data.tasks} />}
+          {page.section === 'archive' && <Archive />}
+          {page.section === 'lessons' && <Lessons />}
+          {page.section === 'operations' && <Operations />}
           {page.section === 'review' && <Review data={data} />}
           {page.section === 'rules' && <div className="fact-grid">
             <Fact label="重大风险需要老板审批" value={data.policy.high_risk_requires_owner ? '启用' : '关闭'} />
@@ -221,6 +230,7 @@ function OrderDetail({ orderKey, refreshDashboard }) {
     {feedback && <p className={feedback.error ? 'connected-alert' : ''} role={feedback.error ? 'alert' : 'status'}>{feedback.message}</p>}
     {booking?.receipts.length > 0 && <section><h3>模拟预订回执</h3><ul>{booking.receipts.map(receipt =>
       <li key={receipt.id}>{receipt.supplier} · {receipt.id} · {money(receipt.amount_cents)}</li>)}</ul></section>}
+    <OrderExtras order={data} />
     {data.plans.map(plan => <details key={plan.id}><summary>{plan.title}</summary><p>{plan.summary}</p>
       <ol>{plan.schedule.map((line, index) => <li key={index}>{line}</li>)}</ol></details>)}
     {data.audit.length > 0 && <details><summary>案件审计</summary><ul>{data.audit.map((event, index) =>

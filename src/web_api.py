@@ -8,18 +8,23 @@ from secrets import compare_digest, token_urlsafe
 from threading import RLock
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, UUID4, ValidationError
+from pypdf.errors import PyPdfError
 
-from src import storage, supplier_simulation as suppliers
+from src import document_intake, operations, storage, supplier_simulation as suppliers
+from src.activity_review import read_activity_documents, report_markdown
 from src import web_flow as flow
 from src.company_store import SimulationConflict
-from src.models import CaseStatus
+from src.models import CaseStatus, TravelCase
+from src.multimodal import MAX_DOCX_BYTES, validate_attachment
 from src.owner_dashboard import load_owner_dashboard
 from src.policy import CompanyPolicy
 from src.workflow import WorkflowError
+from src.web_activity import document_view
+from src.web_features import marketing_view, register_owner_features
 
 CUSTOMER_COOKIE = "miyou_customer"
 OWNER_COOKIE = "miyou_owner"
@@ -30,6 +35,26 @@ FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
 
 class OwnerLogin(BaseModel):
     password: str = Field(max_length=512)
+
+
+class MarketingAction(BaseModel):
+    case_id: str | None = Field(default=None, max_length=100)
+    policy_id: str | None = Field(default=None, max_length=100)
+    campaign_id: str | None = Field(default=None, max_length=100)
+    interest: str = Field(default="", max_length=1500)
+
+
+def attachments_from(files):
+    if not 1 <= len(files) <= 3:
+        raise WorkflowError("请上传 1 到 3 份资料。")
+    attachments = []
+    for file in files:
+        name = (file.filename or "附件").replace("\\", "/").split("/")[-1][:150]
+        content = file.file.read(MAX_DOCX_BYTES + 1)
+        media_type = file.content_type or ""
+        validate_attachment(name, media_type, content)
+        attachments.append((name, media_type, content))
+    return attachments
 
 
 def create_app(frontend=FRONTEND):
@@ -96,15 +121,18 @@ def create_app(frontend=FRONTEND):
                 continue
             order_id = case.get("supplier_order_id")
             booking = suppliers.load_order(order_id)[0] if order_id else None
+            status = case["status"]
+            if status == CaseStatus.WAITING_OWNER:
+                status = flow.customer_status(TravelCase.model_validate(case))
             result.append({
                 "id": case["id"], "title": (case.get("requirements") or {}).get("event_name", "团建活动"),
-                "status": case["status"], "updated_at": row["updated_at"],
+                "status": status, "updated_at": row["updated_at"],
                 "booking_status": booking.status if booking else None,
+                "service_mode": case.get("service_mode", "travel_planning"),
             })
         return result
 
-    @app.post("/api/customer/activities", status_code=202)
-    def create_activity(payload: flow.CreateActivity, customer=Depends(current_customer)):
+    def save_activity(payload, customer, attachments=()):
         case_id = "case_" + sha256(f"{customer}:{payload.request_id}".encode()).hexdigest()[:24]
         with API_LOCK:
             if case := storage.load_case_from_disk(case_id):
@@ -116,12 +144,70 @@ def create_app(frontend=FRONTEND):
             case.id, case.web_customer_id = case_id, customer
             case.status, case.requirements = CaseStatus.WAITING_REQUIREMENTS, req
             storage.save_case_to_disk(case)
-            flow.start_planning(case)
+            flow.start_planning(case, attachments)
             return flow.activity_view(storage.load_case_from_disk(case.id))
+
+    @app.post("/api/customer/activities", status_code=202)
+    def create_activity(payload: flow.CreateActivity, customer=Depends(current_customer)):
+        return save_activity(payload, customer)
+
+    @app.post("/api/customer/activities/with-files", status_code=202)
+    def create_activity_with_files(payload: str = Form(), files: list[UploadFile] = File(),
+                                   customer=Depends(current_customer)):
+        try:
+            request = flow.CreateActivity.model_validate_json(payload)
+        except ValidationError as exc:
+            raise WorkflowError("请检查活动表单后再提交。") from exc
+        return save_activity(request, customer, attachments_from(files))
+
+    @app.post("/api/customer/documents", status_code=202)
+    def create_document(request_id: UUID4 = Form(), files: list[UploadFile] = File(),
+                        customer=Depends(current_customer)):
+        case_id = "case_" + sha256(f"{customer}:document:{request_id}".encode()).hexdigest()[:24]
+        try:
+            sources = read_activity_documents(attachments_from(files))
+        except PyPdfError as exc:
+            raise WorkflowError("PDF 无法读取，请检查文件是否损坏或加密。") from exc
+        with API_LOCK:
+            if case := storage.load_case_from_disk(case_id):
+                return flow.activity_view(case)
+            case = flow.TravelAgencyWorkflow(None).create_case("上传活动资料")
+            case.id, case.web_customer_id = case_id, customer
+            case.service_mode, case.status = "document_intake", CaseStatus.INTAKE
+            case.activity_sources = sources
+            storage.save_case_to_disk(case)
+            flow.enqueue(case, "intake_document", document_intake.intake_documents)
+            return flow.activity_view(storage.load_case_from_disk(case.id))
+
+    def marketing_customer(case_id, customer):
+        if case_id and (booking := flow.booking_for(owned_case(case_id, customer))):
+            return booking[0].customer_id
+        return customer
+
+    @app.get("/api/customer/marketing")
+    def marketing(case_id: str | None = None, customer=Depends(current_customer)):
+        return marketing_view(marketing_customer(case_id, customer))
+
+    @app.post("/api/customer/marketing")
+    def marketing_action(payload: MarketingAction, customer=Depends(current_customer)):
+        key = marketing_customer(payload.case_id, customer)
+        if payload.policy_id:
+            operations.issue_coupon(payload.policy_id, key)
+        else:
+            operations.register_lead(key, payload.interest, payload.campaign_id)
+        return marketing_view(key)
 
     @app.get("/api/customer/activities/{case_id}")
     def activity(case_id: str, customer=Depends(current_customer)):
         return flow.activity_view(owned_case(case_id, customer))
+
+    @app.get("/api/customer/activities/{case_id}/report")
+    def activity_report(case_id: str, customer=Depends(current_customer)):
+        report = owned_case(case_id, customer).activity_review
+        if not report:
+            raise HTTPException(404, "还没有可以下载的审核清单。")
+        return Response(report_markdown(report), media_type="text/markdown",
+                        headers={"Content-Disposition": 'attachment; filename="activity-review.md"'})
 
     @app.post("/api/customer/activities/{case_id}/actions")
     def activity_action(case_id: str, payload: flow.Action, customer=Depends(current_customer)):
@@ -148,11 +234,11 @@ def create_app(frontend=FRONTEND):
 
     @app.get("/api/owner/dashboard", dependencies=[Depends(require_owner)])
     def dashboard():
-        snapshot = load_owner_dashboard()
+        snapshot = load_owner_dashboard(activity_tracking=True)
         return {**snapshot, "policy": CompanyPolicy().model_dump(mode="json")}
 
     def owner_order(key):
-        row = next((x for x in load_owner_dashboard()["orders"] if x["key"] == key), None)
+        row = next((x for x in load_owner_dashboard(activity_tracking=True)["orders"] if x["key"] == key), None)
         if row is None:
             raise HTTPException(404, "找不到该订单。")
         case = storage.load_case_from_disk(row["case_id"]) if row["kind"] == "case" else None
@@ -166,6 +252,10 @@ def create_app(frontend=FRONTEND):
             "running": flow.planning_active(case.id) if case else False,
             "plans": flow.plan_views(case) if case else [],
             "approval": case.approval.model_dump(mode="json") if case and case.approval else None,
+            "plan_feedback": case.plan_acceptance_feedback.model_dump(mode="json") if case and case.plan_acceptance_feedback else None,
+            "delivery_feedback": case.delivery_feedback.model_dump(mode="json") if case and case.delivery_feedback else None,
+            "attachments": [item.model_dump(mode="json") for item in case.attachment_insights] if case else [],
+            **(document_view(case) if case else {}),
             "audit": [item.model_dump(mode="json") for item in case.audit_log[-30:]] if case else [],
         }
 
@@ -182,6 +272,8 @@ def create_app(frontend=FRONTEND):
             flow.owner_action(case, booking, payload)
             return owner_view(*owner_order(key))
 
+    register_owner_features(app, require_owner)
+
     boss = frontend / "boss" / "dist" / "client"
     customer = frontend / "customer" / "dist" / "client"
 
@@ -197,7 +289,7 @@ def create_app(frontend=FRONTEND):
 
     @app.get("/{path:path}", include_in_schema=False)
     def customer_page(path: str):
-        if path.split("/")[0] not in {"", "cases", "about", "create", "activities", "workspace"}:
+        if path.split("/")[0] not in {"", "cases", "about", "create", "activities", "workspace", "documents", "offers"}:
             raise HTTPException(404)
         return frontend_page(customer)
 

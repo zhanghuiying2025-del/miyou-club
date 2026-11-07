@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, UUID4, field_validator
 
 from src import storage, supplier_simulation as suppliers
 from src.agents import AgentConfigurationError, build_agent_team
-from src.models import CaseStatus, CustomerStyleFeedback, PlanAcceptanceFeedback, RequirementSpec
+from src.models import CaseStatus, CustomerStyleFeedback, OutcomeFeedback, PlanAcceptanceFeedback, RequirementSpec
 from src.operations import register_lead
 from src.runtime import active_jobs, submit_once
 from src.supplier_models import BookingNeed, MealSlot
@@ -73,6 +73,13 @@ class Action(BaseModel):
     women: int = Field(default=0, ge=0, le=2000)
     grade: int = Field(default=2, ge=1, le=3)
     dietary: str = Field(default="", max_length=1000)
+    feedback: OutcomeFeedback | None = None
+    coupon_id: str | None = Field(default=None, max_length=100)
+    campaign_id: str | None = Field(default=None, max_length=100)
+    fields: dict[str, str | int | None] = Field(default_factory=dict, max_length=10)
+    purpose: Literal["travel", "activity"] | None = None
+    incident: str = Field(default="", max_length=50)
+    simulated: bool = False
 
 
 def workflow():
@@ -112,12 +119,27 @@ def enqueue(case, action, operation):
     return submit_once(("planning", case.id, case.storage_revision, action), case.id, run)
 
 
-def start_planning(case):
+def start_planning(case, attachments=()):
     async def begin(team, item):
+        if attachments:
+            await team.analyze_attachments(item, attachments)
+            for insight in item.attachment_insights:
+                item.requirements.preferences.extend(insight.preferences_or_intent)
+                item.requirements.hard_constraints.extend(insight.constraints)
         team.confirm_requirements(item)
         await team.advance(item)
 
     enqueue(case, "start", begin)
+
+
+def retry_planning(case):
+    if case.resume_status == CaseStatus.WAITING_REQUIREMENTS:
+        case.status, case.resume_status = CaseStatus.WAITING_REQUIREMENTS, None
+        case.error_message = None
+        storage.save_case_to_disk(case)
+        start_planning(case)
+    else:
+        enqueue(case, "retry", lambda team, item: team.resume_case(item))
 
 
 def booking_for(case):
@@ -151,8 +173,8 @@ def create_booking(case, payload):
     )
     case.booking_route = "supplier"
     storage.save_case_to_disk(case)
-    lead = register_lead(case.id, f"{need.city} · {need.people}人酒店与餐饮")
-    order = suppliers.create_order(need, case.id, campaign_id=lead.get("campaign_id"), case_id=case.id)
+    lead = register_lead(case.web_customer_id or case.id, f"{need.city} · {need.people}人酒店与餐饮", payload.campaign_id)
+    order = suppliers.create_order(need, lead["id"], campaign_id=lead.get("campaign_id"), case_id=case.id)
     case.supplier_order_id = order.id
     storage.save_case_to_disk(case)
     suppliers.contact_all(order.id)
@@ -168,20 +190,46 @@ def contract_view(order):
         return None
 
 
+def customer_status(case):
+    if case.status == CaseStatus.WAITING_OWNER and TravelAgencyWorkflow.customer_decision_exhausted(case):
+        return CaseStatus.WAITING_CUSTOMER
+    return case.status
+
+
+def customer_questions(case, status):
+    if status != CaseStatus.WAITING_CUSTOMER:
+        return []
+    if case.status != CaseStatus.WAITING_OWNER:
+        return case.customer_questions
+    # The stored question list can contain only the first issue from the previous round.
+    findings = [finding for review in case.reviews for finding in review.findings
+                if finding.decision_owner == "customer"]
+    findings.sort(key=lambda finding: finding.blocking is not True)
+    return list(dict.fromkeys([*(finding.description for finding in findings), *case.customer_questions]))
+
+
 def customer_actions(case, booking):
     status = case.status
     if planning_active(case.id):
         return []
+    if case.service_mode in {"document_intake", "activity_review"}:
+        from src.web_activity import document_actions
+        return document_actions(case)
+    if case.journey_demo and case.journey_demo.status != "finished":
+        from src.web_activity import tracking_actions
+        return tracking_actions(case.journey_demo)
+    if status == CaseStatus.WAITING_OWNER and customer_status(case) == CaseStatus.WAITING_CUSTOMER:
+        return ["supplement"]
     if status == CaseStatus.WAITING_REQUIREMENTS:
         return ["start"]
     if status == CaseStatus.WAITING_STYLE_FEEDBACK:
         return ["confirm_direction", "question", "revise_direction"]
     if status == CaseStatus.WAITING_DRAFT:
-        return ["confirm_draft"]
+        return ["confirm_draft", "supplement"]
     if status == CaseStatus.WAITING_CUSTOMER:
         return ["answer"]
     if status == CaseStatus.READY_FOR_CUSTOMER:
-        return ["accept_plan"]
+        return ["accept_plan", "supplement"]
     if status == CaseStatus.NEEDS_REWORK:
         return ["rework"]
     if status in WORKING or (status == CaseStatus.FAILED and case.resume_status):
@@ -200,13 +248,26 @@ def customer_actions(case, booking):
     if order.status == "paid" and not order.supplier_paid_cents and contract_view(order) is None:
         return ["select_quotes", "refresh_quotes"]
     if order.status == "confirmed":
-        return ["confirm_delivery"] if suppliers.linked_delivery_ready(case, order) else ["confirm_schedule"]
+        if not suppliers.linked_delivery_ready(case, order):
+            return ["confirm_schedule"]
+        if not case.journey_demo and case.council_decision and case.council_decision.schedule:
+            return ["confirm_delivery", "start_travel_demo"]
+        return ["confirm_delivery"]
+    if order.status == "completed" and not case.delivery_feedback:
+        return ["delivery_feedback"]
     return []
 
 
 def owner_actions(case, booking):
     if case and planning_active(case.id):
         return []
+    if case and case.service_mode in {"document_intake", "activity_review"}:
+        from src.web_activity import document_actions
+        return document_actions(case, owner=True)
+    if case and case.journey_demo:
+        from src.web_activity import tracking_actions
+        if actions := tracking_actions(case.journey_demo, owner=True):
+            return actions
     if case and case.status == CaseStatus.WAITING_OWNER and case.approval:
         actions = ["reject_plan"]
         if not TravelAgencyWorkflow.customer_decision_exhausted(case):
@@ -221,6 +282,8 @@ def owner_actions(case, booking):
             return ["authorize_deposit"] if order.supplier_paid_cents < deposit else ["submit_booking"]
         if order.status == "delivered":
             return ["settle"]
+    if case and (case.status in WORKING or (case.status == CaseStatus.FAILED and case.resume_status)):
+        return ["retry"]
     return []
 
 
@@ -263,23 +326,30 @@ def plan_views(case):
 
 
 def activity_view(case):
+    from src.web_activity import document_view
     booking = booking_for(case)
     req = case.requirements
     review = case.feedback_assessment
     actions = customer_actions(case, booking)
+    status = customer_status(case)
     error = case.error_message or ""
     if not error.startswith("操作未完成："):
         error = "团队处理未完成，请查看可执行操作。" if case.status == CaseStatus.FAILED else ""
     return {
-        "id": case.id, "revision": case.storage_revision, "status": case.status,
+        "id": case.id, "revision": case.storage_revision, "status": status,
+        "service_mode": case.service_mode,
         "title": req.event_name if req else "团建活动",
         "requirements": req.model_dump(mode="json") if req else None,
         "running": planning_active(case.id), "actions": actions, "plans": plan_views(case),
         "updates": [x.model_dump(mode="json") for x in case.public_updates[-12:]],
-        "questions": case.customer_questions if case.status == CaseStatus.WAITING_CUSTOMER else [],
+        "questions": customer_questions(case, status),
         "message": review.customer_response if review else "",
         "error": error,
         "booking": booking_view(booking),
+        "attachments": [item.model_dump(mode="json") for item in case.attachment_insights],
+        "feedback_options": case.plan_feedback_options.model_dump(mode="json") if case.plan_feedback_options else None,
+        "delivery_feedback": case.delivery_feedback.model_dump(mode="json") if case.delivery_feedback else None,
+        **document_view(case),
         "updated_schedule": suppliers.linked_execution(case, booking[0])[0] if "confirm_schedule" in actions else [],
     }
 
@@ -289,19 +359,34 @@ def customer_action(case, payload):
     booking = booking_for(case)
     if action not in customer_actions(case, booking):
         raise WorkflowError("当前阶段无法执行该操作，请刷新后查看。")
+    if case.service_mode in {"document_intake", "activity_review"}:
+        from src.web_activity import apply_document_action
+        apply_document_action(case, payload, enqueue, start_planning)
+        return
+    from src.web_activity import apply_tracking_action, tracking_actions
+    if action == "start_travel_demo" or (case.journey_demo and action in tracking_actions(case.journey_demo)):
+        if action == "start_travel_demo" and not case.supplier_order_id:
+            case.supplier_order_id = booking[0].id
+        apply_tracking_action(case, payload, enqueue)
+        return
     if action in {"question", "revise_direction", "answer"} and not payload.note.strip():
         raise WorkflowError("请填写内容后提交。")
-    if action == "accept_plan" and payload.outcome == "unacceptable" and not payload.note.strip():
-        raise WorkflowError("请填写不能接受的原因。")
+    if action == "accept_plan" and payload.outcome == "unacceptable" and not (payload.note.strip() or payload.options):
+        raise WorkflowError("请选择或填写不能接受的原因。")
 
-    if action == "start" or (action == "retry" and case.resume_status == CaseStatus.WAITING_REQUIREMENTS):
-        if action == "retry":
-            case.status, case.resume_status = CaseStatus.WAITING_REQUIREMENTS, None
-            case.error_message = None
-            storage.save_case_to_disk(case)
+    if action == "retry":
+        retry_planning(case)
+        return
+    if action == "start":
         start_planning(case)
         return
-    if action in {"confirm_direction", "question", "revise_direction", "confirm_draft", "answer", "accept_plan", "rework", "retry"}:
+    if action == "supplement":
+        TravelAgencyWorkflow(None).record_supplement(case, payload.note)
+        storage.save_case_to_disk(case)
+        if case.pending_supplement:
+            enqueue(case, action, lambda team, item: team.advance(item))
+        return
+    if action in {"confirm_direction", "question", "revise_direction", "confirm_draft", "answer", "accept_plan", "rework"}:
         async def apply(team, item):
             if action == "confirm_direction":
                 await team.submit_style_feedback(item, CustomerStyleFeedback())
@@ -315,17 +400,24 @@ def customer_action(case, payload):
                 team.record_customer_answer(item, payload.note)
                 await team.advance(item)
             elif action == "accept_plan":
-                team.submit_plan_acceptance(item, PlanAcceptanceFeedback(outcome=payload.outcome, comment=payload.note))
+                team.submit_plan_acceptance(item, PlanAcceptanceFeedback(outcome=payload.outcome,
+                                            selected_option_ids=payload.options, comment=payload.note))
             elif action == "rework":
                 await team.rework_rejected_plan(item)
-            else:
-                await team.resume_case(item)
 
         enqueue(case, action, apply)
         return
 
     if action == "request_quotes":
         create_booking(case, payload)
+        return
+    if action == "delivery_feedback":
+        if not payload.feedback:
+            raise WorkflowError("请填写履约评价。")
+        if not case.supplier_order_id:
+            case.supplier_order_id = booking[0].id
+        TravelAgencyWorkflow(None).submit_outcome_feedback(case, payload.feedback, after_delivery=True)
+        storage.save_case_to_disk(case)
         return
 
     order, revision = booking
@@ -338,7 +430,7 @@ def customer_action(case, payload):
         suppliers.confirm_contract(order.id, payload.options, expected_signature=required_signature(payload),
                                    expected_revision=revision)
     elif action == "pay_deposit":
-        suppliers.pay_customer_deposit(order.id, expected_signature=required_signature(payload),
+        suppliers.pay_customer_deposit(order.id, coupon_id=payload.coupon_id, expected_signature=required_signature(payload),
                                        expected_revision=revision)
     elif action == "confirm_schedule":
         if not case.supplier_order_id:
@@ -363,6 +455,18 @@ def required_signature(payload):
 def owner_action(case, booking, payload):
     if payload.action not in owner_actions(case, booking):
         raise WorkflowError("当前阶段没有该老板操作，请刷新后查看。")
+    if case and case.service_mode in {"document_intake", "activity_review"}:
+        from src.web_activity import apply_document_action
+        apply_document_action(case, payload, enqueue, start_planning, owner=True)
+        return
+    if case and case.journey_demo:
+        from src.web_activity import apply_tracking_action, tracking_actions
+        if payload.action in tracking_actions(case.journey_demo, owner=True):
+            apply_tracking_action(case, payload, enqueue, owner=True)
+            return
+    if payload.action == "retry":
+        retry_planning(case)
+        return
     if payload.action in {"approve_plan", "reject_plan"}:
         if payload.action == "reject_plan" and not payload.note.strip():
             raise WorkflowError("请填写退回原因。")

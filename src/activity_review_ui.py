@@ -2,6 +2,7 @@
 import streamlit as st
 
 from src.activity_review import read_activity_documents
+from src.activity_review import report_markdown
 from src.models import AuditEvent, CaseStatus
 from src.activity_order_ui import render_activity_order
 
@@ -105,17 +106,3 @@ def render_activity_case(workflow, case, process_case, save_case, owner=False, s
         st.rerun()
     if tracking_enabled and report:
         render_activity_order(case, save_case, sync)
-
-
-def report_markdown(report):
-    lines = [f"# {report.audit.event_name}", report.audit.summary, "## 原文事实"]
-    lines += [f"- {f.label}：{f.value}（原文：{f.source_quote}）" for f in report.audit.facts]
-    lines.append("## 程序核对与待确认事项")
-    lines += [f"- {f.issue}；依据：{f.evidence}；建议：{f.suggestion}" for f in [*report.program_checks, *report.audit.findings]]
-    lines.append("## 建议执行清单 尚未派发")
-    lines += [f"- {t.phase}｜{t.task}｜建议岗位：{t.suggested_owner}｜{t.timing}｜交付物：{t.deliverable}" for t in report.execution.tasks]
-    lines.append("## 现场顺序")
-    lines += [f"- {s}" for s in report.execution.run_sheet]
-    lines.append("## 请组织者确认")
-    lines += [f"- {q}" for q in report.execution.organizer_questions]
-    return "\n\n".join(lines)

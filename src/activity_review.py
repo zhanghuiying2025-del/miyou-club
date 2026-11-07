@@ -120,3 +120,17 @@ async def review_activity(workflow, case, attachments=None, notes=""):
     case.audit_log.append(AuditEvent(actor="项目经理", action="activity_review_completed",
         detail="保留原活动，完成事实审核与建议执行清单；未修改正式规则、派发任务或进行收付款"))
     return case
+
+
+def report_markdown(report):
+    lines = [f"# {report.audit.event_name}", report.audit.summary, "## 原文事实"]
+    lines += [f"- {f.label}：{f.value}（原文：{f.source_quote}）" for f in report.audit.facts]
+    lines.append("## 程序核对与待确认事项")
+    lines += [f"- {f.issue}；依据：{f.evidence}；建议：{f.suggestion}" for f in [*report.program_checks, *report.audit.findings]]
+    lines.append("## 建议执行清单 尚未派发")
+    lines += [f"- {t.phase}｜{t.task}｜建议岗位：{t.suggested_owner}｜{t.timing}｜交付物：{t.deliverable}" for t in report.execution.tasks]
+    lines.append("## 现场顺序")
+    lines += [f"- {s}" for s in report.execution.run_sheet]
+    lines.append("## 请组织者确认")
+    lines += [f"- {q}" for q in report.execution.organizer_questions]
+    return "\n\n".join(lines)

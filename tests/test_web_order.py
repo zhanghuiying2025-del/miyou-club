@@ -11,7 +11,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from src import company_store, performance, storage
-from src.models import CouncilDecision, FeasibilityReview, ManagedPlan
+from src.models import CouncilDecision, FeasibilityReview, JourneyResponse, ManagedPlan
 from src.web_api import create_app
 from test_compact_planning import checks
 from test_style_request_flow import TEAM, brief
@@ -94,14 +94,23 @@ class WebOrderTests(unittest.TestCase):
         item = wait_for("ready_for_customer")
         read(action(customer, path, "accept_plan", item, outcome="satisfied"))
         item = wait_for("completed")
+        read(owner.post("/api/owner/operations", json={
+            "action": "create_policy", "title": "模拟首单优惠", "amount": 10000,
+            "start": date.today().isoformat(), "end": (date.today() + timedelta(days=10)).isoformat(),
+        }))
+        offers = read(customer.post("/api/customer/marketing", json={"interest": "测试咨询"}))
+        ticket = read(customer.post("/api/customer/marketing",
+                      json={"policy_id": offers["policies"][0]["id"]}))["coupons"][0]["id"]
         item = read(action(customer, path, "request_quotes", item, meal_names=["午餐"]))
         quote = next(q for q in item["booking"]["quotes"] if q["available"] and q["kind"] == "restaurant")
         item = read(action(customer, path, "select_quotes", item, options=[quote["id"]]))
         item = read(action(customer, path, "confirm_contract", item,
                            options=list(item["booking"]["contract"]["conditions"])))
         unpaid = item
-        item = read(action(customer, path, "pay_deposit", item))
+        item = read(action(customer, path, "pay_deposit", item, coupon_id=ticket))
         self.assertEqual(item["booking"]["status"], "paid")
+        self.assertEqual(item["booking"]["contract"]["total_cents"],
+                         unpaid["booking"]["contract"]["total_cents"] - 10000)
         self.assertGreaterEqual(action(customer, path, "pay_deposit", unpaid).status_code, 400)
         boss_item = read(owner.get(order_path))
         self.assertEqual(boss_item["case_id"], created["id"])
@@ -113,13 +122,30 @@ class WebOrderTests(unittest.TestCase):
         item = read(customer.get(path))
         self.assertEqual(item["booking"]["receipts"], boss_item["booking"]["receipts"])
         self.assertEqual(len(item["booking"]["receipts"]), 1)
+        recommendation = JourneyResponse(summary="活动可继续", needs_change=False,
+                                         organizer_notice="继续观察", additional_cost_yuan=0)
+        with patch("src.journey.coordinate_response", new=AsyncMock(return_value=(recommendation, "agent", ""))):
+            item = read(action(customer, path, "start_travel_demo", item))
+            self.assertNotIn("confirm_delivery", item["actions"])
+            for _ in range(3):
+                read(action(customer, path, "next_activity_step", item))
+                item = wait_for("completed")
+            self.assertEqual(item["tracking"]["status"], "finished")
+            self.assertEqual([event["kind"] for event in item["tracking"]["events"]], ["weather", "member"])
         item = read(action(customer, path, "confirm_delivery", item))
         self.assertEqual(item["booking"]["status"], "delivered")
         boss_item = read(owner.get(order_path))
         self.assertEqual(boss_item["actions"], ["settle"])
         read(action(owner, order_path, "settle", boss_item))
         self.assertGreaterEqual(action(owner, order_path, "settle", boss_item).status_code, 400)
-        self.assertEqual(read(customer.get(path))["booking"]["status"], "completed")
+        settled = read(customer.get(path))
+        self.assertEqual(settled["booking"]["status"], "completed")
+        feedback = dict.fromkeys(("overall_rating", "novelty_rating", "culture_rating", "detail_rating",
+                                  "engagement_rating", "feasibility_rating"), 4)
+        reviewed = read(action(customer, path, "delivery_feedback", settled, feedback=feedback))
+        self.assertEqual(reviewed["delivery_feedback"]["overall_rating"], 4)
+        self.assertEqual(read(owner.get(order_path))["delivery_feedback"]["overall_rating"], 4)
+        self.assertGreaterEqual(action(customer, path, "delivery_feedback", reviewed, feedback=feedback).status_code, 400)
         dashboard = read(owner.get("/api/owner/dashboard"))
         self.assertEqual(dashboard["main_orders"], {"paid": 1, "settled": 1})
         cash = company_store.list_records("supplier_order")
