@@ -1,0 +1,7 @@
+streamlit>=1.66,<2
+pydantic>=2.10,<3
+python-dotenv>=1.0,<2
+agent-framework-openai>=1.0,<2
+pypdf>=6,<7
+Pillow>=10
+redis>=5,<8

@@ -1,0 +1,3 @@
+# Optional local embeddings. The core demo and keyword search do not need this.
+-r requirements.txt
+sentence-transformers>=3
