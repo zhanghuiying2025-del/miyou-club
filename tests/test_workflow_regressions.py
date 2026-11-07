@@ -199,6 +199,7 @@ class WorkflowRegressions(unittest.TestCase):
             case.resume_status = CaseStatus.CROSS_REVIEW
             save_case_to_disk(case)
             app.sidebar.radio[0].set_value("公司老板").run()
+            app.sidebar.radio(key="work_area").set_value("团建策划与交付").run()
             next(item for item in app.selectbox if item.label == "历史案件与未完成进度").set_value(case.id).run()
             self.assertEqual(len(app.exception), 0)
             self.assertTrue(any(item.label == "从中断步骤继续处理" for item in app.button))

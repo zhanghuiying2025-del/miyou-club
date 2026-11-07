@@ -233,6 +233,7 @@ class DocumentAndOrderPageTests(unittest.TestCase):
         self.assertFalse(app.exception)
         self.assertEqual(load_case_from_disk().journey_demo.status, 'awaiting_owner')
         app.sidebar.radio[0].set_value('公司老板').run()
+        app.sidebar.radio(key='work_area').set_value('团建策划与交付').run()
         next(s for s in app.selectbox if s.label == '历史案件与未完成进度').set_value(load_case_from_disk().id).run()
         next(b for b in app.button if b.label == '批准建议，交组织者确认').click().run()
         self.assertEqual(load_case_from_disk().journey_demo.status, 'awaiting_organizer')

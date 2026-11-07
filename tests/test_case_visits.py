@@ -97,17 +97,19 @@ class CaseVisitTests(unittest.TestCase):
         self.assertTrue(any(x.label=="活动城市 *" for x in app.text_input))
         app.sidebar.radio[0].set_value("公司老板")
         self.rerun_app(app,"fresh-browser")
-        selector=next(x for x in app.selectbox if x.label=="历史案件与未完成进度")
-        self.assertIsNone(selector.value)
+        self.assertEqual(app.sidebar.radio(key="work_area").value,"经营驾驶舱")
         self.assertFalse(any(b.label=="在客户页面继续此案件" for b in app.button))
         with patch("src.visits._browser_visit",return_value=SimpleNamespace(visit={"id":"fresh-browser","navigation":"navigate"})):
-            selector.set_value(old.id).run()
+            app.button(key="owner_dashboard_go_orders").click().run()
+            app.button(key=f"owner_dashboard_open:case:{old.id}").click().run()
+            self.assertEqual(app.session_state["case"].id,old.id)
             next(b for b in app.button if b.label=="在客户页面继续此案件").click().run()
         self.assertEqual(app.sidebar.radio[0].value,"客户")
         self.assertEqual(app.session_state["case"].status,CaseStatus.WAITING_REQUIREMENTS)
         app.sidebar.radio[0].set_value("公司老板")
         self.rerun_app(app,"fresh-browser")
-        self.assertIsNone(next(x for x in app.selectbox if x.label=="历史案件与未完成进度").value)
+        self.assertEqual(app.sidebar.radio(key="work_area").value,"经营驾驶舱")
+        self.assertFalse(any(b.label=="在客户页面继续此案件" for b in app.button))
         self.assertEqual(load_case_from_disk(old.id).storage_revision,old.storage_revision)
 
     def test_refresh_restores_same_visit_while_another_visit_is_blank(self):
@@ -121,6 +123,28 @@ class CaseVisitTests(unittest.TestCase):
         fresh=self.app("different-browser")
         self.assertTrue(any(x.label=="活动城市 *" for x in fresh.text_input))
         self.assertEqual(len(list_saved_cases()),1)
+
+    def test_empty_owner_dashboard_navigation_needs_no_model_or_company_database(self):
+        visit = "empty-owner-dashboard"
+        save_visit(visit, {"identity": "公司老板"})
+        with patch("src.agents.build_agent_team", side_effect=AssertionError("dashboard must not build agents")):
+            app = self.app(visit)
+            navigation = app.segmented_control(key="owner_dashboard_page")
+            self.assertEqual(navigation.value, "经营总览")
+            self.assertEqual(navigation.options, ["经营总览", "订单与风险", "经营复盘", "AI 员工与制度"])
+            self.assertEqual(len(app.metric), 4)
+            app.button(key="owner_dashboard_go_orders").click()
+            self.rerun_app(app, visit)
+            self.assertEqual(app.segmented_control(key="owner_dashboard_page").value, "订单与风险")
+            for page in ["经营复盘", "经营总览"]:
+                app.segmented_control(key="owner_dashboard_page").set_value(page)
+                self.rerun_app(app, visit)
+                self.assertTrue(any(title.value == page for title in app.subheader))
+            app.button(key="owner_dashboard_go_tasks").click()
+            self.rerun_app(app, visit)
+            self.assertEqual(app.segmented_control(key="owner_dashboard_page").value, "AI 员工与制度")
+        self.assertFalse(app.exception)
+        self.assertFalse((self.root / "company.sqlite3").exists())
 
     def test_background_old_case_save_does_not_redirect_current_customer(self):
         first,second=case("后台第一单"),case("前台第二单")
@@ -148,7 +172,8 @@ class CaseVisitTests(unittest.TestCase):
         second.status=CaseStatus.WAITING_DRAFT
         second.council_decision=CouncilDecision(theme="草案",summary="原草案",schedule=["休息"],merged_ideas=[],rationale=[])
         save_case_to_disk(first);save_case_to_disk(second)
-        save_visit("owner-browser",{"identity":"公司老板","owner_case_id":first.id})
+        save_visit("owner-browser",{"identity":"公司老板","owner_case_id":first.id,
+            "work_area":"团建策划与交付"})
         app=self.app("owner-browser")
         self.assertIsNone(next(x for x in app.selectbox if x.label=="历史案件与未完成进度").value)
         with patch("src.visits._browser_visit",return_value=SimpleNamespace(visit={"id":"owner-browser","navigation":"reload"})):
@@ -190,7 +215,8 @@ class CaseVisitTests(unittest.TestCase):
         fresh.sidebar.radio[0].set_value("公司老板")
         self.rerun_app(fresh,"supplier-new-browser")
         with patch("src.visits._browser_visit",return_value=SimpleNamespace(visit={"id":"supplier-new-browser","navigation":"reload"})):
-            next(s for s in fresh.selectbox if s.label=="选择预订订单").set_value(order.id).run()
+            fresh.button(key="owner_dashboard_go_orders").click().run()
+            fresh.button(key=f"owner_dashboard_open:supplier:{order.id}").click().run()
             next(b for b in fresh.button if b.label=="在客户页面继续此预订").click().run()
         self.assertFalse(fresh.exception)
         self.assertEqual(fresh.sidebar.radio[0].value,"客户")

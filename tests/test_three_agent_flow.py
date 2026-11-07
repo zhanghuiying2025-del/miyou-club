@@ -196,6 +196,7 @@ class ThreeAgentFlowTests(unittest.TestCase):
             app = AppTest.from_file(str(app_path), default_timeout=30).run()
             app.session_state['case'] = case
             app.sidebar.radio[0].set_value("公司老板").run()
+            app.sidebar.radio(key="work_area").set_value("团建策划与交付").run()
             self.assertEqual(len(app.exception), 0)
             next(b for b in app.button if b.label == "授权模拟供应商支出").click().run()
             self.assertEqual(len(app.exception), 0)

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import queue
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -34,6 +35,10 @@ from src.document_intake import intake_documents
 from src.document_intake_ui import render_document_upload, render_document_confirmation
 from src.supplier_ui import render_supplier_workspace
 from src.history_ui import render_history_workspace, render_case_references
+from src.organization import load_organization_state
+from src.owner_dashboard import load_owner_dashboard
+from src.owner_dashboard_ui import render_owner_dashboard
+from src.policy import CompanyPolicy
 
 
 st.set_page_config(
@@ -61,6 +66,11 @@ OWNER_STATUS_LABELS = {
     CaseStatus.COMPLETED: "已完成",
     CaseStatus.FAILED: "执行失败",
 }
+
+OWNER_DASHBOARD_AREA = "经营驾驶舱"
+TRAVEL_AREA = "团建策划与交付"
+SUPPLIER_AREA = "酒店餐饮模拟预订"
+HISTORY_AREA = "历史订单管理"
 
 CUSTOMER_STATUS_LABELS = {
     CaseStatus.WAITING_REQUIREMENTS: "请确认需求，确认后开始策划",
@@ -939,7 +949,7 @@ def render_customer_portal(workflow, case, request_type):
                     st.error(str(exc))
 
 
-def render_owner_overview(workflow, case):
+def render_owner_overview(case):
     st.subheader("公司案件总览")
     if case is None:
         st.info("目前没有客户案件。")
@@ -984,9 +994,9 @@ def render_owner_overview(workflow, case):
     }:
         if st.button("从中断步骤继续处理", type="primary"):
             try:
-                process_case(workflow, case, "Agent 团队正在从中断步骤继续……", action="resume")
+                process_case(get_workflow(), case, "Agent 团队正在从中断步骤继续……", action="resume")
                 st.rerun()
-            except WorkflowError as exc:
+            except (WorkflowError, AgentConfigurationError) as exc:
                 st.error(str(exc))
 
     if case.status == CaseStatus.NEEDS_REWORK:
@@ -999,9 +1009,9 @@ def render_owner_overview(workflow, case):
                 st.info(case.plan_acceptance_feedback.comment)
         if st.button("根据客户拒绝原因重新策划", type="primary"):
             try:
-                process_case(workflow, case, "委员会正在根据客户拒绝意见返工……", action="rework")
+                process_case(get_workflow(), case, "委员会正在根据客户拒绝意见返工……", action="rework")
                 st.rerun()
-            except WorkflowError as exc:
+            except (WorkflowError, AgentConfigurationError) as exc:
                 st.error(str(exc))
 
     if case.council_decision:
@@ -1183,7 +1193,7 @@ def render_owner_council(case):
                         st.caption(f"需要决定：{finding.decision_owner}")
 
 
-def render_owner_approval(workflow, case):
+def render_owner_approval(case):
     st.subheader("老板审批中心")
     if case is None:
         st.info("目前没有案件。")
@@ -1202,18 +1212,22 @@ def render_owner_approval(workflow, case):
         st.write(f"- {reason}")
     comment = st.text_area("老板意见")
     left, right = st.columns(2)
-    if left.button("批准", type="primary", use_container_width=True):
-        try:
-            case = run_async(workflow.submit_owner_decision(case, True, comment))
-            save_case(case)
-            st.rerun()
-        except (WorkflowError, AgentOutputError) as exc:
-            save_case(case)
-            st.error(str(exc))
-    if right.button("拒绝", use_container_width=True):
-        case = run_async(workflow.submit_owner_decision(case, False, comment))
+    approved = left.button("批准", type="primary", use_container_width=True)
+    rejected = right.button("拒绝", use_container_width=True)
+    if not (approved or rejected):
+        return
+    try:
+        workflow = get_workflow()
+    except AgentConfigurationError as exc:
+        st.error(str(exc))
+        return
+    try:
+        case = run_async(workflow.submit_owner_decision(case, approved, comment))
         save_case(case)
         st.rerun()
+    except (WorkflowError, AgentOutputError) as exc:
+        save_case(case)
+        st.error(str(exc))
 
 
 def render_owner_audit(case):
@@ -1229,15 +1243,15 @@ def render_owner_audit(case):
         st.divider()
 
 
-def render_company_policy(workflow):
+def render_company_policy(policy, organization):
     st.subheader("公司治理制度")
     st.write("这些规则由程序执行，Agent 不能通过提示词绕过。")
     st.json(
         {
-            "客户最多补充轮次": workflow.policy.max_clarification_rounds,
-            "Agent内部最多修订次数": workflow.policy.max_revision_count,
+            "客户最多补充轮次": policy.max_clarification_rounds,
+            "Agent内部最多修订次数": policy.max_revision_count,
             "不可自动修复的高风险": "必须由老板审批"
-            if workflow.policy.high_risk_requires_owner
+            if policy.high_risk_requires_owner
             else "允许自动通过",
             "反馈改进": "按版本保存证据；相似条件选入经验和检查项，不自动认定责任或发薪",
         }
@@ -1245,7 +1259,7 @@ def render_company_policy(workflow):
 
     st.markdown("#### 客户投诉形成的长期约束")
     active_constraints = [
-        item for item in workflow.organization.constraints if item.active
+        item for item in organization.constraints if item.active
     ]
     if not active_constraints:
         st.info("目前还没有经过认定的长期约束。")
@@ -1278,14 +1292,15 @@ def render_live_tasks(case):
         st.caption("服务当前没有正在执行的后台任务；已完成、失败及中断记录见下方案件与协作记录。")
 
 
-def render_owner_console():
-    st.header("一人公司老板驾驶舱")
-    st.caption("查看完整协作过程，但只在关键经营决策时介入。")
+def render_owner_console(*, show_case_picker=True, linked_supplier_id=None):
+    st.header("案件工作台" if show_case_picker else "订单详情")
     case = get_case()
-    history=list_saved_cases()
+    if not show_case_picker and case:
+        st.button("在客户页面继续此案件", on_click=resume_for_customer, args=(case.id,), key="resume_customer_case")
+    history=list_saved_cases() if show_case_picker else []
     ids=[r["id"] for r in history]
     labels={r["id"]:f"{r['title'][:35]} · {'方案已确认' if r['status']=='completed' else OWNER_STATUS_LABELS.get(r['status'],r['status'])} · {r['id']}" for r in history}
-    if case and case.id not in ids:
+    if show_case_picker and case and case.id not in ids:
         ids.insert(0,case.id)
         labels[case.id]=case.customer_request[:35]+" · "+case.id
     if ids:
@@ -1302,12 +1317,10 @@ def render_owner_console():
             st.button("在客户页面继续此案件",on_click=resume_for_customer,args=(case.id,),key="resume_customer_case")
             st.caption("恢复已保存的需求、方案、审批、预订与活动步骤；不会重新执行已完成的模型步骤或重复收款。")
     if case is None:
-        st.info("案件进度会自动保存。请选择一个案件查看，或到「历史订单管理」浏览完整档案。" if ids else "已保存的案件会出现在这里。")
-        return
-    try:
-        workflow = get_workflow()
-    except AgentConfigurationError as exc:
-        st.error(str(exc))
+        if show_case_picker:
+            st.info("案件进度会自动保存。请选择一个案件查看，或到「历史订单管理」浏览完整档案。" if ids else "已保存的案件会出现在这里。")
+        else:
+            st.info("该案件当前不可用，请返回驾驶舱查看最新记录。")
         return
     render_live_tasks(case)
     if case and case.service_mode == "document_intake":
@@ -1329,7 +1342,7 @@ def render_owner_console():
                 st.error(str(exc))
         return
     if case and case.service_mode == "activity_review":
-        render_activity_case(workflow, case, process_case, save_case, owner=True, sync=sync_current_case,
+        render_activity_case(None, case, process_case, save_case, owner=True, sync=sync_current_case,
                              tracking_enabled=activity_order.TRACKING_ENABLED)
         with st.expander("审核与细化的任务交接"):
             st.dataframe([{"执行方": r.receiver, "任务": r.task, "状态": r.status,
@@ -1351,15 +1364,16 @@ def render_owner_console():
         ["案件与审批", "协作与分歧", "反馈与改进", "审计与规则"]
     )
     with overview:
-        render_owner_overview(workflow, case)
+        render_owner_overview(case)
         change_requests = [event.detail for event in case.audit_log if event.action == "booking_change_requested"]
         if change_requests:
             with st.expander("客户补充的订单变更请求", expanded=True):
                 for message in change_requests:
                     st.write(message)
-        render_owner_approval(workflow, case)
-        if case and case.supplier_order_id:
-            render_supplier_workspace(owner=True,order_id=case.supplier_order_id)
+        render_owner_approval(case)
+        supplier_id = case.supplier_order_id or linked_supplier_id
+        if supplier_id:
+            render_owner_supplier_order(supplier_id)
         else:
             render_procurement(case, save_case, owner=True, sync=sync_current_case)
         if activity_order.TRACKING_ENABLED:
@@ -1389,12 +1403,70 @@ def render_owner_console():
         with st.expander("审计记录"):
             render_owner_audit(case)
         with st.expander("审批规则与反馈约束"):
-            render_company_policy(workflow)
+            render_dashboard_policy()
 
 
-def reset_owner_case_on_entry():
-    if st.session_state["identity"] != "公司老板":
+def open_dashboard_order(order):
+    st.session_state["owner_dashboard_order"] = (
+        order["kind"], order["source_id"], order.get("supplier_order_id")
+    )
+    st.session_state["owner_dashboard_return_page"] = st.session_state.get("owner_dashboard_page", "经营总览")
+    if order["kind"] == "case":
+        bind_case(order["source_id"], owner=True)
+        st.session_state.pop("case", None)
+
+
+def return_to_dashboard():
+    st.session_state.pop("owner_dashboard_order", None)
+    st.session_state["owner_dashboard_page"] = st.session_state.pop("owner_dashboard_return_page", "经营总览")
+
+
+def render_dashboard_policy():
+    try:
+        organization = load_organization_state()
+    except (OSError, ValueError):
+        st.error("公司制度记录暂时无法读取，请检查本地文件。")
         return
+    render_company_policy(CompanyPolicy(), organization)
+
+
+def render_owner_supplier_order(order_id):
+    try:
+        render_supplier_workspace(owner=True, order_id=order_id)
+    except (OSError, ValueError, sqlite3.Error):
+        st.error("预订记录暂时无法读取，请返回驾驶舱查看最新记录。")
+
+
+def render_owner_dashboard_workspace():
+    selected = st.session_state.get("owner_dashboard_order")
+    if selected:
+        st.button("返回经营驾驶舱", on_click=return_to_dashboard, key="owner_dashboard_return")
+        kind, source_id, linked_supplier_id = selected
+        if kind == "supplier":
+            render_owner_supplier_order(source_id)
+        else:
+            render_owner_console(show_case_picker=False, linked_supplier_id=linked_supplier_id)
+        return
+    try:
+        snapshot = load_owner_dashboard()
+    except (OSError, ValueError, sqlite3.Error):
+        st.error("经营记录暂时无法读取，请检查本地订单档案和模拟账本。")
+        st.button("重新读取", key="owner_dashboard_retry")
+        return
+    render_owner_dashboard(snapshot, open_order=open_dashboard_order, render_policy=render_dashboard_policy)
+
+
+def switch_identity():
+    st.session_state.pop("owner_dashboard_order", None)
+    st.session_state.pop("owner_dashboard_return_page", None)
+    if st.session_state["identity"] != "公司老板":
+        st.session_state["work_area"] = st.session_state.get("customer_work_area", TRAVEL_AREA)
+        return
+    area = st.session_state.get("work_area")
+    if area in (TRAVEL_AREA, SUPPLIER_AREA):
+        remember_view(customer_work_area=area)
+    st.session_state["work_area"] = OWNER_DASHBOARD_AREA
+    st.session_state["owner_dashboard_page"] = "经营总览"
     previous = st.session_state.get("owner_case_id")
     case = st.session_state.get("case")
     if case is not None and getattr(case, "id", None) == previous:
@@ -1410,7 +1482,7 @@ def switch_customer_area(area):
 
 def render_customer_entry(area):
     case = get_case()
-    booking = area == "酒店餐饮模拟预订"
+    booking = area == SUPPLIER_AREA
     request_type = "团建策划"
     if case is None:
         active_booking = booking and (st.session_state.get("customer_supplier_order_id")
@@ -1422,12 +1494,12 @@ def render_customer_entry(area):
                 request_type = st.radio("需求类型", ["团建策划", "酒店餐饮预订", "上传已有资料"],
                                         index=1 if booking else 0, horizontal=True, key="customer_request_type")
                 booking = request_type == "酒店餐饮预订"
-                selected_area = "酒店餐饮模拟预订" if booking else "团建策划与交付"
+                selected_area = SUPPLIER_AREA if booking else TRAVEL_AREA
                 if selected_area != area:
                     switch_customer_area(selected_area)
     if booking:
         if case is not None:
-            st.button("返回团建需求", on_click=switch_customer_area, args=("团建策划与交付",))
+            st.button("返回团建需求", on_click=switch_customer_area, args=(TRAVEL_AREA,))
         render_supplier_workspace(case=case, attach=save_case)
         return
     try:
@@ -1440,30 +1512,37 @@ def render_customer_entry(area):
 
 initialize_visit()
 st.sidebar.title("身份切换")
-role = st.sidebar.radio("当前身份", ["客户", "公司老板"],key="identity",on_change=reset_owner_case_on_entry)
-work_areas = ["团建策划与交付", "酒店餐饮模拟预订", "历史订单管理"]
+role = st.sidebar.radio("当前身份", ["客户", "公司老板"], key="identity", on_change=switch_identity)
+work_areas = [TRAVEL_AREA, SUPPLIER_AREA, HISTORY_AREA]
+if role == "公司老板":
+    work_areas.insert(0, OWNER_DASHBOARD_AREA)
 if st.session_state.get("work_area") not in work_areas:
     st.session_state["work_area"] = work_areas[0]
 if role == "公司老板":
-    business_area = st.sidebar.radio("工作区", work_areas, key="work_area")
+    business_area = st.sidebar.radio(
+        "工作区", work_areas, key="work_area", on_change=return_to_dashboard
+    )
 else:
     # Retain the selection when Streamlit removes the sidebar widget.
-    selected_area = st.session_state.get("work_area", "团建策划与交付")
+    selected_area = st.session_state.get("work_area", TRAVEL_AREA)
     st.session_state["work_area"] = selected_area
-    business_area = "团建策划与交付" if selected_area == "历史订单管理" else selected_area
+    business_area = TRAVEL_AREA if selected_area == HISTORY_AREA else selected_area
 remember_view(identity=role,work_area=st.session_state["work_area"])
 st.sidebar.caption("演示模式：当前未启用账号登录，仅用于展示角色与权限边界。")
 
-st.title("🧭 OPC 团建旅行社")
-st.caption("演示环境 · 供应商、预订与付款使用模拟数据。")
+if business_area != OWNER_DASHBOARD_AREA:
+    st.title("🧭 OPC 团建旅行社")
+    st.caption("演示环境 · 供应商、预订与付款使用模拟数据。")
 if "sync_notice" in st.session_state:
     st.info(st.session_state.pop("sync_notice"))
 
 if role == "客户":
     render_customer_entry(business_area)
-elif business_area == "历史订单管理":
+elif business_area == OWNER_DASHBOARD_AREA:
+    render_owner_dashboard_workspace()
+elif business_area == HISTORY_AREA:
     render_history_workspace(owner=True)
-elif business_area == "酒店餐饮模拟预订":
+elif business_area == SUPPLIER_AREA:
     render_supplier_workspace(owner=True, case=get_case(), attach=save_case)
 else:
     render_owner_console()

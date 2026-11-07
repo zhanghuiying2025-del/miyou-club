@@ -241,6 +241,7 @@ class FeedbackLearningTests(unittest.TestCase):
             app = AppTest.from_file(str(Path(__file__).parents[1] / "app.py"), default_timeout=30).run()
             app.session_state["case"] = case
             app.sidebar.radio[0].set_value("公司老板").run()
+            app.sidebar.radio(key="work_area").set_value("团建策划与交付").run()
             self.assertEqual(len(app.exception), 0)
             self.assertIn("反馈与改进", [tab.label for tab in app.tabs])
             self.assertNotIn("信任分", [metric.label for metric in app.metric])

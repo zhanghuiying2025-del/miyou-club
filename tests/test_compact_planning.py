@@ -235,5 +235,6 @@ class CompactPlanningTests(unittest.TestCase):
             app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"), default_timeout=30).run()
             app.session_state["case"] = case
             app.sidebar.radio[0].set_value("公司老板").run()
+            app.sidebar.radio(key="work_area").set_value("团建策划与交付").run()
             self.assertEqual(len(app.exception), 0)
             self.assertTrue(any("履约执行检查" in item.value for item in app.subheader))

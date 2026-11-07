@@ -66,17 +66,17 @@ def initialize_visit():
     st.session_state["visit_id"]=event["id"]
     st.session_state["visit_provisional"]=False
     for key in ("case","case_view_role","customer_case_id","owner_case_id","customer_supplier_order_id",
-                "owner_supplier_order_id","supplier_selected","supplier_order_select_customer","supplier_order_select_owner","owner_history_select"):
+                "owner_supplier_order_id","supplier_selected","supplier_order_select_customer","supplier_order_select_owner","owner_history_select",
+                "customer_work_area","owner_dashboard_page","owner_dashboard_order","owner_dashboard_return_page"):
         st.session_state.pop(key,None)
     st.session_state["identity"]=view.get("identity","客户")
-    st.session_state["work_area"]=view.get("work_area","团建策划与交付")
-    for key in ("customer_case_id","customer_supplier_order_id","owner_supplier_order_id"):
+    for key in ("customer_case_id","customer_supplier_order_id","owner_supplier_order_id","customer_work_area"):
         if key in view:
             st.session_state[key]=view[key]
-    if view.get("identity"):
-        st.session_state["identity"]=view["identity"]
     if view.get("work_area"):
         st.session_state["work_area"]=view["work_area"]
+    else:
+        st.session_state.pop("work_area", None)
     if view.get("customer_supplier_order_id"):
         st.session_state["supplier_selected"]=view["customer_supplier_order_id"]
         st.session_state["supplier_order_select_customer"]=view["customer_supplier_order_id"]
