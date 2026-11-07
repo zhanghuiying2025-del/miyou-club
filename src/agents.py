@@ -162,8 +162,8 @@ def response_prefix(response_model):
             "每项问题必须有evidence、release_condition及decision_owner(owner/customer/null)；无问题返回空列表。"
             "plan.completion_conditions列本轮交付完成条件，不等于批准立即执行。"
             "待报价、档期、容量列plan.pending_resources，不能仅因尚未预订要求老板审批。"
-            "需客户决定写plan.customer_questions；硬性冲突或安全问题不得省略。"
-            "adopted_contributions引用宋野/沈知行/夏橙实际提案或折中建议的从0起下标，映射到本版行程，禁止编造。")
+            "普通偏好和待定分配写plan.customer_notice；真实硬性冲突或安全问题写带依据的findings。"
+            "adopted_contributions引用实际提案或折中建议的从0起下标，映射到本版行程，禁止编造。")
     elif response_model.__name__ == "ManagerReview":
         length = ("只做检查，不重新生成行程。统一findings，以domain区分operations/risk；无问题为空。"
             "每项必须有事实evidence、解除条件release_condition和decision_owner(owner/customer/null)。"

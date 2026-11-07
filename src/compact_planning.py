@@ -105,10 +105,13 @@ async def run_deliberation(workflow, case):
         f"策划提案：{proposal_payload(case)}\n"
         f"履约实际检查：{case.feasibility_review.model_dump_json()}\n"
         "没有策划互评，不得编造同事对话或共识。贡献只使用activity映射到原提案活动下标；不用compromise。"
-        "逐条处理履约问题，不得通过删除问题绕过客户或老板决定。硬性冲突保留在findings或plan.customer_questions。"
+        "已有客户选择和已答复的信息不要再问。预算细分、餐饮口味、备选活动等普通取舍在现有限制内先做可撤销的选择，"
+        "并在plan.customer_notice标明方案假设；待报价和档期写plan.pending_resources。"
+        "硬性冲突、安全问题或必须变更已确认条件时写结构化findings，给出明确依据、解除条件及决策人。"
         "普通分歧由你解决；这是方案整合与检查阶段，不宣称已落实资源。",
         ManagedPlan)
     case.council_decision = result.plan
+    needs_final_check = workflow.keep_plan_questions_as_notes(case)
     case.manager_resolutions = result.resolutions
     result.checks.operations = normalize_review(result.checks.operations)
     result.checks.risk = normalize_review(result.checks.risk)
@@ -117,7 +120,7 @@ async def run_deliberation(workflow, case):
     review = executor_review(case)
     # A manager's claim to have repaired a blocking condition needs a fresh
     # executor check of the final text. Human decisions can never be erased.
-    case.final_recheck_required = any(blocks_review(review, f) for f in review.findings)
+    case.final_recheck_required = needs_final_check or any(blocks_review(review, f) for f in review.findings)
     case.manager_check_fingerprint = plan_fingerprint(case)
     case.manager_checks_cached_at = time.time()
     workflow._customer_objections(case, result.plan.customer_concerns,

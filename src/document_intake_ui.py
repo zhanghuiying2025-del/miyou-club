@@ -3,8 +3,8 @@ import streamlit as st
 
 from src.activity_review import read_activity_documents
 from src.document_intake import FIELD_LABELS, missing_fields, update_document_fields, confirm_document_route
-from src.request_ui import show_request_summary
-from src.style_planning import STYLE_OPTIONS, style_for
+from src.request_ui import show_request_summary, single_choice
+from src.style_planning import STYLE_OPTIONS
 
 
 def render_document_upload(workflow, process_case, save_case, existing_case=None):
@@ -16,10 +16,10 @@ def render_document_upload(workflow, process_case, save_case, existing_case=None
         submitted = st.form_submit_button('读取文档，整理已有信息', type='primary')
     if submitted:
         try:
-            sources = read_activity_documents([(f.name, f.type or 'application/octet-stream', f.getvalue()) for f in files])
             case = existing_case.model_copy(deep=True) if existing_case else workflow.create_case('根据客户上传文档整理需求')
-            if case.procurement_order or case.journey_demo:
+            if case.procurement_order or case.supplier_order_id or case.booking_route or case.journey_demo:
                 raise ValueError('已有订单正在执行，请新建服务后再上传文档')
+            sources = read_activity_documents([(f.name, f.type or 'application/octet-stream', f.getvalue()) for f in files])
             case.service_mode = 'document_intake'
             case.activity_sources = sources
             case.activity_review_notes = notes.strip()
@@ -76,6 +76,13 @@ def render_document_confirmation(workflow, case, process_case, save_case, *, tra
         st.info('当前只需补充：' + '、'.join(FIELD_LABELS[x] for x in missing[:2]) + '。已读取的信息不会重复询问。')
     else:
         st.caption('基础信息齐全。预算、参赛细分人数等仅在影响具体任务时再确认，不强制补满所有字段。')
+    choose_style = purpose == 'travel' and not missing and case.planning_mode == "style_branch"
+    style = None
+    if choose_style:
+        st.subheader("确认需求")
+        show_request_summary(req)
+        style = single_choice("活动风格", STYLE_OPTIONS, value=req.preferred_style or "还没想好",
+                              key=f"customer_document_style:{case.id}")
     with st.form(f'document_missing_{case.id}'):
         values = {}
         for field in fields:
@@ -91,11 +98,6 @@ def render_document_confirmation(workflow, case, process_case, save_case, *, tra
                     value=req.participant_count, step=1)
             else:
                 values[field] = st.text_input(label, value=case.document_venue if field == 'venue' else req.city or '')
-        style = None
-        if purpose == 'travel' and not missing and case.planning_mode == "style_branch":
-            st.subheader("确认需求")
-            show_request_summary(req)
-            style = st.selectbox("活动风格", STYLE_OPTIONS, index=STYLE_OPTIONS.index(style_for(req.preferred_style)))
         notes = st.text_input('补充说明（选填）', placeholder='例如，说明参赛与观众人数。') if edit else ""
         label = '保存补充信息' if missing else '保存并确认继续' if edit else '确认信息并继续'
         submitted = st.form_submit_button(label, type='primary')
@@ -103,6 +105,8 @@ def render_document_confirmation(workflow, case, process_case, save_case, *, tra
         try:
             if any(v is None or v == '' for v in values.values()):
                 raise ValueError('请填写本轮必要信息；未确定时请先与组织者核实')
+            if choose_style and not style:
+                raise ValueError("请选择活动风格，或填写其他风格。")
             update_document_fields(case, values)
             if style is not None:
                 case.requirements.preferred_style = style

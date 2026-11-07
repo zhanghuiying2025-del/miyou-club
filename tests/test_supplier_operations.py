@@ -13,6 +13,12 @@ from src.company_store import transaction,finance_summary,list_records,Simulatio
 from src.supplier_models import BookingNeed,MealSlot,ContactPlan,ContactAction
 
 
+def dashboard_order_button(app, key):
+    app.segmented_control(key="owner_dashboard_page").set_value("订单与风险").run()
+    app.selectbox(key="owner_dashboard_order_selection").set_value(key).run()
+    return app.button(key=f"owner_dashboard_open:{key}")
+
+
 def need(**changes):
     values=dict(city="模拟目的地",check_in="2026-11-06",check_out="2026-11-08",men=100,women=50,
         meals=[MealSlot(day=date(2026,11,d),meal=m) for d in (6,7,8) for m in ("午餐","晚餐")],
@@ -268,21 +274,25 @@ class SupplierOperationsTests(unittest.TestCase):
             self.assertEqual(len(app.exception),0)
             next(b for b in app.button if b.label=="下一步").click().run()
             self.assertFalse(any(r.label == "需求类型" for r in app.radio))
-            next(r for r in app.radio if r.label=="怎么确定活动风格？").set_value("还没想好，选一个").run()
+            next(p for p in app.pills if p.label=="活动风格").set_value("其他").run()
+            self.assertTrue(any(t.label=="活动风格（其他）" for t in app.text_input))
             next(b for b in app.button if b.label=="下一步").click().run()
             self.assertTrue(app.error)
-            next(s for s in app.selectbox if s.label=="选择一个活动风格").set_value("城市游玩")
+            next(p for p in app.pills if p.label=="活动风格").set_value("城市游玩")
             next(b for b in app.button if b.label=="下一步").click().run()
             next(b for b in app.button if b.label=="上一步").click().run()
-            self.assertEqual(next(s for s in app.selectbox if s.label=="选择一个活动风格").value, "城市游玩")
+            self.assertEqual(next(p for p in app.pills if p.label=="活动风格").value, "城市游玩")
             next(b for b in app.button if b.label=="下一步").click().run()
             next(b for b in app.button if b.label=="下一步").click().run()
+            next(m for m in app.multiselect if m.label=="口味与忌口").set_value(["清淡","其他"]).run()
+            next(t for t in app.text_area if t.label=="口味与忌口（其他）").set_value("花生过敏")
             next(b for b in app.button if b.label=="查询报价").click().run()
             self.assertEqual(len(app.exception),0)
             records=list_records("supplier_order")
             self.assertEqual(len(records),1)
             self.assertEqual(records[0]["world_source"],"fixed_simulation")
             self.assertEqual(records[0]["need"]["preferred_style"], "城市游玩")
+            self.assertEqual(records[0]["need"]["dietary"], "清淡；花生过敏")
             self.assertTrue(records[0]["quotes"])
             self.assertFalse(any(b.key==f"contact_agent:{records[0]['id']}" for b in app.button))
             self.assertFalse(any(b.key==f"expire:{records[0]['id']}" for b in app.button))
@@ -317,9 +327,16 @@ class SupplierOperationsTests(unittest.TestCase):
             self.assertFalse(any(s.label=="优惠券" for s in app.selectbox))
             next(b for b in app.button if b.label.startswith("支付预付款")).click().run()
             self.assertEqual(len(app.exception),0)
-            self.assertEqual(business.load_order(order.id)[0].discount_cents,0)
+            paid_order, _ = business.load_order(order.id)
+            self.assertEqual(paid_order.discount_cents, 0)
             app.sidebar.radio[0].set_value("公司老板").run()
-            app.button(key=f"owner_dashboard_pending:supplier:{order.id}").click().run()
+            app.segmented_control(key="owner_dashboard_page").set_value("经营复盘").run()
+            metrics = {metric.label: metric.value for metric in app.metric}
+            self.assertEqual(metrics["累计模拟收款"], f"¥{paid_order.customer_paid_cents / 100:,.2f}")
+            self.assertEqual(metrics["累计模拟支出"], "¥0.00")
+            self.assertEqual(metrics["模拟现金余额"], f"¥{46_000 + paid_order.customer_paid_cents / 100:,.2f}")
+            self.assertTrue(any("已确认净服务费 ¥0.00" in caption.value for caption in app.caption))
+            dashboard_order_button(app, f"supplier:{order.id}").click().run()
             next(b for b in app.button if b.label=="老板授权模拟支付酒店餐饮定金").click().run()
             next(b for b in app.button if b.label=="执行工具提交模拟预订并获取回执").click().run()
             self.assertEqual(len(app.exception),0)
@@ -327,7 +344,7 @@ class SupplierOperationsTests(unittest.TestCase):
             next(c for c in app.checkbox if c.label=="酒店和餐饮服务已完成").check().run()
             next(b for b in app.button if b.label=="确认完成并支付尾款").click().run()
             app.sidebar.radio[0].set_value("公司老板").run()
-            app.button(key=f"owner_dashboard_pending:supplier:{order.id}").click().run()
+            dashboard_order_button(app, f"supplier:{order.id}").click().run()
             next(b for b in app.button if b.label=="老板授权结清供方并完成本单").click().run()
             self.assertEqual(len(app.exception),0)
             self.assertEqual(business.load_order(order.id)[0].status,"completed")
@@ -338,6 +355,175 @@ class SupplierOperationsTests(unittest.TestCase):
         order=self.choose(order,hotel="hotel-c")
         with self.assertRaises(SimulationConflict):
             business.confirm_contract(order.id,list(business.contract(order)["conditions"]),"customer",old)
+
+    def test_meals_only_order_with_zero_rounded_deposit_can_be_fulfilled(self):
+        from streamlit.testing.v1 import AppTest
+
+        meal = MealSlot(day="2026-11-06", meal="午餐")
+        meal_need = need(check_out="2026-11-06", include_hotel=False, men=0, women=0,
+                         participant_count=1, meals=[meal])
+        world = business.fixed_world(meal_need)
+        world.restaurants[1].price_per_person_cents = 1
+        ops.register_lead("one-meal", "仅餐饮")
+        with patch.object(business, "fixed_world", return_value=world):
+            order = business.create_order(meal_need, "one-meal")
+        order = business.contact_all(order.id)
+        quote = next(q for q in order.quotes if q.supplier_id == "meal-b")
+        order = self.agreed(business.select_quotes(order.id, [quote.id]))
+        business.pay_customer_deposit(order.id)
+
+        app = AppTest.from_string(
+            "from src.supplier_ui import render_supplier_workspace\n"
+            f"render_supplier_workspace(owner=True, order_id={order.id!r})"
+        ).run()
+        app.button(key=f"fulfill:{order.id}").click().run()
+        self.assertFalse(app.exception)
+        confirmed, _ = business.load_order(order.id)
+        self.assertEqual(confirmed.status, "confirmed")
+        self.assertEqual(confirmed.supplier_paid_cents, 0)
+
+    def test_direct_linked_order_requires_itinerary_confirmation_before_tail_payment(self):
+        from streamlit.testing.v1 import AppTest
+        from src.models import CaseStatus, CouncilDecision, TravelCase
+        from src.storage import save_case_to_disk
+
+        case = TravelCase(customer_request="含烟花的团建", status=CaseStatus.COMPLETED,
+                          booking_route="supplier",
+                          council_decision=CouncilDecision(theme="活动", summary="活动",
+                              schedule=["烟花"], merged_ideas=[], rationale=[]))
+        with patch("src.storage.CASE_FILE", Path(self.temp.name) / "cases.json"):
+            save_case_to_disk(case)
+            order = self.paid(self.create(case_id=case.id))
+            business.pay_supplier_deposit(order.id, "owner")
+            business.fulfill_bookings(order.id)
+            app = AppTest.from_string(
+                "from src.supplier_ui import render_supplier_workspace\n"
+                f"render_supplier_workspace(order_id={order.id!r})"
+            ).run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any(b.key == f"resume_linked_delivery:{order.id}" for b in app.button))
+            self.assertFalse(any(b.key == f"tail:{order.id}" for b in app.button))
+            with self.assertRaisesRegex(ValueError, "确认更新后的执行行程"):
+                business.finish_service(order.id)
+            self.assertEqual(business.load_order(order.id)[0].customer_paid_cents, order.customer_paid_cents)
+
+            case.supplier_order_id = order.id
+            business.confirm_linked_execution(case)
+            save_case_to_disk(case)
+            app.run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any(b.key == f"tail:{order.id}" for b in app.button))
+            self.assertEqual(business.finish_service(order.id).status, "delivered")
+
+    def test_day_trip_books_and_settles_meals_inside_same_case(self):
+        from streamlit.testing.v1 import AppTest
+        from src.models import CaseStatus,CouncilDecision,RequirementSpec,TravelCase
+        from src.orchestration import lifecycle
+        from src.procurement import start_procurement
+        from src.storage import load_case_from_disk,save_case_to_disk
+        case=TravelCase(customer_request="南京一日团建",status=CaseStatus.COMPLETED,planning_mode="style_branch",
+            requirements=RequirementSpec(city="南京",event_date="2026-11-20",participant_count=15,
+                duration="1天",preferred_style="城市游玩",hard_constraints=["需要素食选择"],budget_yuan=4000),
+            council_decision=CouncilDecision(theme="城市协作",summary="一日团建",schedule=["小组探索","午餐"],
+                merged_ideas=[],rationale=[]))
+        save_case_to_disk(case)
+        app_path=Path(__file__).resolve().parents[1]/"app.py"
+        with patch("src.agents.build_agent_team",return_value=SimpleNamespace()):
+            app=AppTest.from_file(str(app_path),default_timeout=30)
+            app.session_state["customer_case_id"]=case.id
+            app.run()
+            self.assertFalse(app.exception)
+            self.assertFalse(next(c for c in app.checkbox if c.label=="同时预订住宿").value)
+            self.assertEqual(next(m for m in app.multiselect if m.label=="口味与忌口").value,["素食"])
+            next(b for b in app.button if b.label=="查询本团建的报价").click().run()
+            self.assertFalse(app.exception)
+            saved=load_case_from_disk(case.id)
+            order_id=saved.supplier_order_id
+            order,_=business.load_order(order_id)
+            self.assertEqual(order.case_id,case.id)
+            self.assertEqual(order.need.people,15)
+            self.assertEqual(order.need.dietary,"需要素食选择")
+            self.assertEqual(order.need.check_in,order.need.check_out)
+            self.assertEqual(order.need.nights,[])
+            self.assertFalse(any(q.kind=="hotel" for q in order.quotes))
+            self.assertFalse(any(b.label=="新建预订" for b in app.button))
+            with self.assertRaisesRegex(ValueError,"已进入酒店餐饮预订"):
+                start_procurement(saved,4000,0,2)
+            # Restore the case pointer if a prior visit ended after recording the booking.
+            saved.supplier_order_id=None
+            save_case_to_disk(saved)
+            app.run()
+            self.assertEqual(load_case_from_disk(case.id).supplier_order_id,order_id)
+            self.assertEqual(len(list_records("supplier_order")),1)
+            next(b for b in app.button if b.label=="查看预订明细").click().run()
+            next(c for c in app.checkbox if "超过团建原总预算" in c.label).check()
+            next(b for b in app.button if b.label=="确认报价及预订条件").click().run()
+            next(b for b in app.button if b.label.startswith("支付预付款")).click().run()
+            app.sidebar.radio[0].set_value("公司老板").run()
+            dashboard_order_button(app, f"case:{case.id}").click().run()
+            next(b for b in app.button if b.label=="老板授权模拟支付酒店餐饮定金").click().run()
+            app.button(key="owner_dashboard_return").click().run()
+            app.segmented_control(key="owner_dashboard_page").set_value("经营总览").run()
+            self.assertTrue(any("累计已付 1 笔" in item.value for item in app.caption))
+            submit_booking = dashboard_order_button(app, f"case:{case.id}")
+            self.assertEqual(submit_booking.label,"提交预订")
+            submit_booking.click().run()
+            next(b for b in app.button if b.label=="执行工具提交模拟预订并获取回执").click().run()
+            next(b for b in app.button if b.label=="在客户页面继续此案件").click().run()
+            next(c for c in app.checkbox if c.label=="餐饮服务已完成").check().run()
+            next(b for b in app.button if b.label=="确认完成并支付尾款").click().run()
+            app.sidebar.radio[0].set_value("公司老板").run()
+            dashboard_order_button(app, f"case:{case.id}").click().run()
+            next(b for b in app.button if b.label=="老板授权结清供方并完成本单").click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(lifecycle(load_case_from_disk(case.id)),"订单完成并结算")
+            app.button(key="owner_dashboard_return").click().run()
+            app.segmented_control(key="owner_dashboard_page").set_value("经营总览").run()
+            self.assertEqual(next(m for m in app.metric if m.label=="已结清团建主单").value,"1 笔")
+            app.button(key="owner_dashboard_go_orders").click().run()
+            app.button(key=f"owner_dashboard_open:case:{case.id}").click().run()
+            next(b for b in app.button if b.label=="在客户页面继续此案件").click().run()
+            next(b for b in app.button if b.label=="提交履约评价").click().run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any(h.value=="订单已完成" for h in app.subheader))
+            self.assertTrue(any(e.label=="预订回执" for e in app.expander))
+            details=next(e for e in app.expander if e.label=="查看行程细节")
+            self.assertFalse(details.proto.expanded)
+            next(b for b in app.button if b.label=="开启新订单").click().run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any(t.label=="活动城市 *" and not t.value for t in app.text_input))
+            self.assertIsNone(app.session_state.get("customer_case_id"))
+            self.assertIsNotNone(load_case_from_disk(case.id).delivery_feedback)
+            self.assertEqual(business.load_order(order_id)[0].status,"completed")
+
+    def test_overnight_trip_inherits_dates_and_checks_room_split(self):
+        from streamlit.testing.v1 import AppTest
+        from src.models import CaseStatus,CouncilDecision,RequirementSpec,TravelCase
+        from src.storage import load_case_from_disk,save_case_to_disk
+        case=TravelCase(customer_request="南京两日团建",status=CaseStatus.COMPLETED,planning_mode="style_branch",
+            requirements=RequirementSpec(city="南京",event_date="2026-11-20",participant_count=15,
+                duration="2天1晚",preferred_style="城市游玩"),
+            council_decision=CouncilDecision(theme="城市协作",summary="过夜团建",schedule=["小组探索","午餐"],
+                merged_ideas=[],rationale=[]))
+        save_case_to_disk(case)
+        app_path=Path(__file__).resolve().parents[1]/"app.py"
+        with patch("src.agents.build_agent_team",return_value=SimpleNamespace()):
+            app=AppTest.from_file(str(app_path),default_timeout=30)
+            app.session_state["customer_case_id"]=case.id
+            app.run()
+            self.assertTrue(next(c for c in app.checkbox if c.label=="同时预订住宿").value)
+            next(b for b in app.button if b.label=="查询本团建的报价").click().run()
+            self.assertTrue(any("合计须等于团建人数" in e.value for e in app.error))
+            self.assertEqual(list_records("supplier_order"),[])
+            next(n for n in app.number_input if n.label=="参与住宿的男性人数").set_value(7)
+            next(n for n in app.number_input if n.label=="参与住宿的女性人数").set_value(8)
+            next(b for b in app.button if b.label=="查询本团建的报价").click().run()
+            self.assertFalse(app.exception)
+            order,_=business.load_order(load_case_from_disk(case.id).supplier_order_id)
+            self.assertEqual(order.need.nights,["2026-11-20"])
+            self.assertEqual(order.need.rooms,8)
+            self.assertEqual([m.key for m in order.need.meals],["2026-11-20:午餐","2026-11-21:午餐"])
+            self.assertTrue(any(q.kind=="hotel" for q in order.quotes))
 
     def test_disabled_coupon_cannot_be_claimed_or_redeemed(self):
         order=self.create();coupon=self.coupon()

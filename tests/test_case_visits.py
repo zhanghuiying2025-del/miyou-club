@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from src.models import TravelCase,CaseStatus,RequirementSpec,OrganizationState,CouncilDecision
+from src.models import ApprovalRequest,TravelCase,CaseStatus,RequirementSpec,OrganizationState,CouncilDecision
 from src.storage import (save_case_to_disk,load_case_from_disk,list_saved_cases,save_visit,load_visit,
     delete_case_from_disk,CaseConflictError)
 
@@ -132,7 +132,17 @@ class CaseVisitTests(unittest.TestCase):
             navigation = app.segmented_control(key="owner_dashboard_page")
             self.assertEqual(navigation.value, "经营总览")
             self.assertEqual(navigation.options, ["经营总览", "订单与风险", "经营复盘", "AI 员工与制度"])
-            self.assertEqual(len(app.metric), 4)
+            metrics = {metric.label: metric.value for metric in app.metric}
+            self.assertEqual(metrics["待老板处理"], "0 项")
+            self.assertNotIn("累计模拟收款", metrics)
+            app.button(key="owner_dashboard_go_review").click()
+            self.rerun_app(app, visit)
+            metrics = {metric.label: metric.value for metric in app.metric}
+            self.assertEqual(metrics["累计模拟收款"], "¥0.00")
+            self.assertEqual(metrics["累计模拟支出"], "¥0.00")
+            self.assertEqual(metrics["模拟现金余额"], "¥46,000.00")
+            app.segmented_control(key="owner_dashboard_page").set_value("经营总览")
+            self.rerun_app(app, visit)
             app.button(key="owner_dashboard_go_orders").click()
             self.rerun_app(app, visit)
             self.assertEqual(app.segmented_control(key="owner_dashboard_page").value, "订单与风险")
@@ -145,6 +155,27 @@ class CaseVisitTests(unittest.TestCase):
             self.assertEqual(app.segmented_control(key="owner_dashboard_page").value, "AI 员工与制度")
         self.assertFalse(app.exception)
         self.assertFalse((self.root / "company.sqlite3").exists())
+
+    def test_owner_dashboard_leaves_exhausted_clarification_with_customer(self):
+        pending = case("等待客户确认关键条件")
+        pending.status = CaseStatus.WAITING_OWNER
+        pending.planning_mode = "style_branch"
+        pending.clarification_rounds = 1
+        pending.customer_answer_pending = True
+        pending.approval = ApprovalRequest(title="方案待核对", reasons=["客户还未确认关键条件"])
+        save_case_to_disk(pending)
+        visit = "owner-clarification-visit"
+        save_visit(visit, {"identity": "公司老板"})
+        with patch("src.agents.build_agent_team", side_effect=AssertionError("reading approval must not build agents")):
+            app = self.app(visit)
+            self.assertEqual(next(m for m in app.metric if m.label == "待老板处理").value, "0 项")
+            app.button(key="owner_dashboard_go_orders").click()
+            self.rerun_app(app, visit)
+            self.assertEqual(app.dataframe[0].value.iloc[0]["接手人"], "客户")
+            app.button(key=f"owner_dashboard_open:case:{pending.id}").click()
+            self.rerun_app(app, visit)
+            self.assertTrue(next(b for b in app.button if b.label == "批准").disabled)
+        self.assertFalse(app.exception)
 
     def test_background_old_case_save_does_not_redirect_current_customer(self):
         first,second=case("后台第一单"),case("前台第二单")

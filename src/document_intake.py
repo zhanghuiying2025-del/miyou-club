@@ -29,7 +29,7 @@ def missing_fields(case, purpose):
 
 
 async def intake_documents(workflow, case, attachments=None):
-    if case.procurement_order or case.journey_demo:
+    if case.procurement_order or case.supplier_order_id or case.booking_route or case.journey_demo:
         raise ValueError('已有订单正在执行，不能通过重新读取文档覆盖执行信息')
     sources = read_activity_documents(attachments) if attachments else case.activity_sources
     if not sources:
@@ -81,7 +81,7 @@ def update_document_fields(case, values):
 
 
 def confirm_document_route(case, purpose):
-    if case.procurement_order or case.journey_demo:
+    if case.procurement_order or case.supplier_order_id or case.booking_route or case.journey_demo:
         raise ValueError('已有执行订单，不能切换需求处理流程')
     if purpose not in {'activity', 'travel'}:
         raise ValueError('请选择文档的处理用途')

@@ -280,6 +280,7 @@ class TravelAgencyWorkflow:
                 CouncilDecision,
             )
             case.council_decision = revised
+            self.keep_plan_questions_as_notes(case)
             case.draft_revision_count += 1
             case.draft_change_requests.append("；".join(changes))
             case.applied_constraints.extend(f"客户草案调整：{x}" for x in changes)
@@ -291,6 +292,7 @@ class TravelAgencyWorkflow:
                 case.pending_customer_step = CaseStatus.DELIBERATION
                 self._ask_customer(case, revised.unresolved_customer_decisions)
             return case
+        self.keep_plan_questions_as_notes(case)
         if case.council_decision.unresolved_customer_decisions:
             raise WorkflowError("请先回答草案中的待决问题")
         self._log(case, "customer", "draft_confirmed", "客户确认组合方向，进入经理检查与程序规则")
@@ -447,7 +449,8 @@ class TravelAgencyWorkflow:
         case.customer_questions = list(dict.fromkeys(questions))[:1 if modern else 3]
         if case.clarification_rounds >= (1 if modern else self.policy.max_clarification_rounds):
             case.approval = ApprovalRequest(
-                title="客户关键问题仍未解决，请决定如何继续沟通",
+                title=("关键条件仍待确认，暂缓发布方案" if modern else
+                       "客户关键问题仍未解决，请决定如何继续沟通"),
                 reasons=case.customer_questions,
             )
             case.customer_answer_pending = True
@@ -455,6 +458,47 @@ class TravelAgencyWorkflow:
         else:
             case.customer_answer_pending = False
             case.status = CaseStatus.WAITING_CUSTOMER
+
+    def keep_plan_questions_as_notes(self, case: TravelCase) -> bool:
+        plan = case.council_decision
+        if case.planning_protocol != "compact_v1" or not plan or not plan.unresolved_customer_decisions:
+            return False
+        # A free-text question has no evidence or severity. Only the structured
+        # reviews and program checks may block a confirmed proposal.
+        plan.items_to_verify = list(dict.fromkeys([
+            *plan.items_to_verify, *[q.strip() for q in plan.unresolved_customer_decisions if q.strip()],
+        ]))
+        plan.unresolved_customer_decisions = []
+        case.final_recheck_required = True
+        return True
+
+    def restore_optional_question_wait(self, case: TravelCase) -> bool:
+        if (case.service_mode != "travel_planning" or case.planning_protocol != "compact_v1"
+                or case.status not in {CaseStatus.WAITING_CUSTOMER, CaseStatus.WAITING_OWNER}
+                or (case.status == CaseStatus.WAITING_OWNER and not case.customer_answer_pending)
+                or case.pending_customer_step != CaseStatus.DELIBERATION or case.pending_owner_step
+                or case.pending_supplement or case.procurement_order or case.supplier_order_id or case.journey_demo
+                or not case.requirements or self._required_questions(case.requirements)
+                or not case.council_decision or not case.council_decision.schedule):
+            return False
+        if not case.customer_questions or not set(case.customer_questions) <= set(case.council_decision.unresolved_customer_decisions):
+            return False
+        from src.compact_planning import executor_review
+        checks = [*case.reviews, executor_review(case)]
+        if case.manager_checks:
+            checks.extend([case.manager_checks.operations, case.manager_checks.risk])
+        optional = set(case.council_decision.unresolved_customer_decisions)
+        if any(blocks_review(review, finding) for review in checks for finding in review.findings
+               if not (review.reviewer_name == "程序硬性检查" and finding.description in optional)):
+            return False
+        self.keep_plan_questions_as_notes(case)
+        case.customer_questions = []
+        case.customer_answer_pending = False
+        case.pending_customer_step = None
+        case.approval = None
+        case.status = CaseStatus.WAITING_DRAFT
+        self._log(case, "程序", "draft_wait_recovered", "普通待确认事项已移到草案备注，保留现有行程和最终检查。")
+        return True
 
     async def _run_intake(self, case: TravelCase) -> None:
         self._progress("项目经理正在整理需求与检查硬性冲突……")
@@ -509,7 +553,7 @@ class TravelAgencyWorkflow:
             questions.append("团建在哪个城市举行？")
         if not requirements.event_date:
             questions.append("团建的具体日期是什么？")
-        if requirements.participant_count is None:
+        if requirements.participant_count is None or requirements.participant_count <= 0:
             questions.append("预计有多少人参加？")
         return questions
 
@@ -630,7 +674,7 @@ discussion_message 是你在团队讨论区的一句公开发言，最多120字�
             )
         case.status = CaseStatus.WAITING_STYLE_FEEDBACK
 
-    async def _run_style_branch(self, case):
+    async def _run_style_branch(self, case, revision_reason=""):
         style = (case.requirements.preferred_style or "").strip() or "还没想好"
         guide = STYLE_GUIDES.get(style, "以客户原话为准，保留明确的偏好和限制。")
         self._progress(f"策划正在按「{style}」准备提案……")
@@ -653,6 +697,9 @@ discussion_message 是你在团队讨论区的一句公开发言，最多120字�
             f"附件信息：{json.dumps([x.model_dump() for x in case.attachment_insights], ensure_ascii=False)}\n"
             f"客户确认使用的文档：{json.dumps([s.text for s in case.activity_sources], ensure_ascii=False)}\n"
             f"此前提案（有变更时仅调整相关部分）：{json.dumps(prior, ensure_ascii=False)}\n"
+            f"本案已确认的调整：{json.dumps(case.applied_constraints, ensure_ascii=False)}\n"
+            f"客户本轮要求修改：{revision_reason or '无'}\n"
+            "若客户说团队已去过某些地点，视为本单避免重复的偏好；按原预算、日期、人数和风格替换相关地点，保留其余可用安排。"
             "给出一份与选定方向相符的提案，写清核心活动、取舍与待履约核查事项。"
             "优先借鉴相似满意方案的活动结构，按本单人数、预算、场地和硬性要求调整。"
             "旧方案的报价、地点与档期都需要重新核实；discussion_message 是你向履约同事的一句简短交接。",
@@ -667,10 +714,26 @@ discussion_message 是你在团队讨论区的一句公开发言，最多120字�
                       opinion=opinion.model_dump(mode="json"))
         case.status = CaseStatus.WAITING_STYLE_FEEDBACK
 
+    async def revise_direction(self, case, reason):
+        if case.status != CaseStatus.WAITING_STYLE_FEEDBACK or case.planning_mode != "style_branch":
+            raise InvalidStateError("当前没有可修改的团建方向")
+        reason = reason.strip()
+        if not reason:
+            raise WorkflowError("请填写想修改的内容和理由")
+        await self._run_style_branch(case, revision_reason=reason)
+        case.plan_version += 1
+        case.applied_constraints.append(f"客户要求调整方向：{reason}")
+        case.feedback_assessment = None
+        case.style_feedback = None
+        case.council_decision = None
+        self._log(case, "客户", "direction_revised", reason)
+
     async def submit_style_feedback(
         self,
         case: TravelCase,
         feedback: CustomerStyleFeedback,
+        *,
+        question_only: bool = False,
     ) -> TravelCase:
         if case.status != CaseStatus.WAITING_STYLE_FEEDBACK:
             raise InvalidStateError("当前状态不能提交风格选择或投诉")
@@ -680,10 +743,6 @@ discussion_message 是你在团队讨论区的一句公开发言，最多120字�
             raise WorkflowError("未知的偏好策划师")
         if feedback.disliked_agent and feedback.disliked_agent not in valid_agents:
             raise WorkflowError("未知的不喜欢策划师")
-
-        case.style_feedback = feedback
-        if feedback.preferred_agent:
-            case.lead_agent = feedback.preferred_agent
 
         self._progress("正在记录客户偏好；有质疑或投诉时核对具体证据……")
         if not feedback.question.strip() and not feedback.complaint.strip():
@@ -705,12 +764,20 @@ discussion_message 是你在团队讨论区的一句公开发言，最多120字�
 {feedback.model_dump_json(indent=2)}
 
 判断反馈属于风格偏好、普通质疑还是投诉。偏好差异不能算员工过错；
+客户新说已经去过某个地方、希望更换景点，属于新偏好。解释安排，建议从「修改方案」提交改动，不升级老板。
 认定合理投诉时，evidence必须分别逐字引用一段客户需求和一段方案内容，不得改写引文。
+只有确认原提案违反已明确条件，且需要老板介入时，才同时填写complaint_present、complaint_reasonable和requires_owner。
 organization_constraints只写针对问题的检查建议，按相似条件复用，不直接变成全公司禁令。
 """,
                 FeedbackAssessment,
             )
-        case.feedback_assessment = assessment
+        has_feedback = bool(feedback.question.strip() or feedback.complaint.strip())
+        if has_feedback or not case.feedback_assessment:
+            case.feedback_assessment = assessment
+        if not question_only:
+            case.style_feedback = feedback
+            if feedback.preferred_agent:
+                case.lead_agent = feedback.preferred_agent
 
         preference_constraints: list[str] = []
         if feedback.preferred_agent:
@@ -726,23 +793,25 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
                 f"本案客户偏好：{feedback.preference_reason.strip()}"
             )
 
-        case.applied_constraints.extend(
-            list(dict.fromkeys(preference_constraints + assessment.case_constraints))
-        )
-
-        if assessment.complaint_present and assessment.complaint_reasonable:
-            if not verified_complaint_evidence(case, assessment):
+        verified = bool(assessment.complaint_present and assessment.complaint_reasonable
+                        and verified_complaint_evidence(case, assessment))
+        if not verified:
+            if assessment.requires_owner:
+                assessment.customer_response = "已记录你的疑问。若希望调整活动或地点，可以通过「修改方案」说明理由。"
+            assessment.requires_owner = False
+            if assessment.complaint_reasonable:
                 assessment.complaint_reasonable = None
                 assessment.organization_constraints = []
                 assessment.rationale += "；尚缺可逐字核对的需求及方案证据，暂不形成长期检查项"
-            else:
-                event_id = f"{case.id}:style_complaint"
-                lessons = lessons_from_complaint(case, assessment, event_id)
-                saved = record_feedback(event_id, lessons)
-                self._log_learned_scenarios(case, saved)
-                case.applied_constraints.extend(
-                    f"本案投诉检查：{item.title}" for item in saved
-                    if f"本案投诉检查：{item.title}" not in case.applied_constraints)
+        else:
+            event_id = f"{case.id}:style_complaint"
+            lessons = lessons_from_complaint(case, assessment, event_id)
+            saved = record_feedback(event_id, lessons)
+            self._log_learned_scenarios(case, saved)
+            preference_constraints.extend(f"本案投诉检查：{item.title}" for item in saved)
+        if verified or not question_only:
+            preference_constraints.extend(assessment.case_constraints)
+            case.applied_constraints = list(dict.fromkeys(case.applied_constraints + preference_constraints))
 
         self._log(
             case,
@@ -750,10 +819,14 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
             "style_feedback_assessed",
             assessment.rationale,
         )
+        if question_only:
+            self._log(case, "客户", "direction_question_submitted", feedback.question.strip())
         if assessment.requires_owner:
-            case.pending_owner_step = CaseStatus.CROSS_REVIEW
+            case.pending_owner_step = CaseStatus.WAITING_STYLE_FEEDBACK if question_only else CaseStatus.CROSS_REVIEW
             case.approval = ApprovalRequest(title="客户投诉需要老板确认处理", reasons=[assessment.rationale])
             case.status = CaseStatus.WAITING_OWNER
+            return case
+        if question_only:
             return case
         if case.planning_mode == "style_branch":
             self._publish(case, "项目经理", "交给履约", "我已记录你的选择，请履约同事核对资源和执行条件。", source="workflow_status")
@@ -887,7 +960,8 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
         if compact:
             prompt += (
                 "\n你以履约执行身份复核项目经理修改或仍阻塞的事项；"
-                "未预订、报价待核实通常是待落实资源，不自动升级为老板审批；明确硬性冲突仍须报告。"
+                "一般偏好、细分预算和待核实报价或档期只做提示，不要求客户重新回答。"
+                "只有现有安排明确违反硬性条件或需要改变已确认承诺时才标出阻塞，附具体依据和解除条件；安全风险仍须报告。"
             )
             if case.feasibility_review:
                 prompt += "\n此前履约检查：" + case.feasibility_review.model_dump_json()
@@ -918,6 +992,7 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
 
     async def _review_and_revise(self, case: TravelCase) -> None:
         while case.revision_count <= self.policy.max_revision_count:
+            self.keep_plan_questions_as_notes(case)
             case.reviews = await self._run_reviews(case)
             findings = [finding for review in case.reviews for finding in review.findings if blocks_review(review, finding)]
             if case.council_decision:
@@ -1041,7 +1116,7 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
             raise WorkflowError("请填写要补充的信息")
         if case.service_mode != "travel_planning" or case.pending_supplement:
             raise InvalidStateError("当前已有待处理的补充，请先完成本轮")
-        if case.procurement_order or case.supplier_order_id or case.journey_demo:
+        if case.procurement_order or case.supplier_order_id or case.booking_route or case.journey_demo:
             case.customer_supplements.append(text)
             self._log(case, "客户", "booking_change_requested", text)
             return case
@@ -1062,6 +1137,8 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
             "将能解决待确认事项的补充写入需求；需要客户确认的冲突保持清晰，最多记录一个真正阻塞的问题。",
             IntakeResult)
         req = updated.requirements
+        if case.requirements:
+            req = case.requirements.model_copy(update=req.model_dump(exclude_unset=True))
         missing = self._required_questions(req)
         changed_style = bool(case.requirements and
             (req.preferred_style or "").strip() != (case.requirements.preferred_style or "").strip())
@@ -1102,6 +1179,7 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
         case.customer_objections = []
         if revision:
             case.council_decision = revision
+            self.keep_plan_questions_as_notes(case)
             self._publish(case, "策划", "补充后的调整", revision.summary)
             if revision.unresolved_customer_decisions:
                 case.pending_customer_step = CaseStatus.DELIBERATION
@@ -1125,6 +1203,8 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
             raise InvalidStateError("当前状态不需要客户补充信息")
         if not answer.strip():
             raise WorkflowError("客户回答不能为空")
+        if case.planning_mode == "style_branch":
+            return self.record_supplement(case, answer)
         questions = "\n".join(f"- {item}" for item in case.customer_questions)
         case.customer_request += f"\n\n系统追问：\n{questions}\n客户回答：\n{answer}"
         case.customer_questions = []
@@ -1152,6 +1232,8 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
     ) -> TravelCase:
         if case.status != CaseStatus.WAITING_OWNER or case.approval is None:
             raise InvalidStateError("当前没有等待老板审批的事项")
+        if approved and self.customer_decision_exhausted(case):
+            raise WorkflowError("关键条件仍需客户补充，不能通过老板审批再次发起追问或发布方案")
         if approved and not case.pending_owner_step and not case.customer_answer_pending and (not case.council_decision or not case.council_decision.schedule):
             raise WorkflowError("缺少可执行行程，不能仅凭老板批准发布方案")
         case.approval.approved = approved
@@ -1177,6 +1259,13 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
             case.status = CaseStatus.FAILED
             case.error_message = "老板拒绝了该方案"
         return case
+
+    @staticmethod
+    def customer_decision_exhausted(case: TravelCase) -> bool:
+        return (case.planning_mode == "style_branch" and case.clarification_rounds >= 1
+                and (case.customer_answer_pending or any(
+                    f.decision_owner == "customer" and blocks_review(review, f)
+                    for review in case.reviews for f in review.findings)))
 
     async def customer_accept_plan(self, case: TravelCase) -> TravelCase:
         if case.status != CaseStatus.READY_FOR_CUSTOMER:

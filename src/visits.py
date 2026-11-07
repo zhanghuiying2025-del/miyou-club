@@ -113,7 +113,8 @@ def resume_for_customer(case_id):
 
 
 def resume_supplier(order_id):
-    remember_view(customer_supplier_order_id=order_id,identity="客户",work_area="酒店餐饮模拟预订")
+    st.session_state.pop("case", None)
+    remember_view(customer_case_id=None,customer_supplier_order_id=order_id,identity="客户",work_area="酒店餐饮模拟预订")
     st.session_state["identity"]="客户"
     st.session_state["work_area"]="酒店餐饮模拟预订"
     st.session_state["supplier_selected"]=order_id

@@ -70,6 +70,8 @@ def start_procurement(case: TravelCase, quote: float, nights: int, grade: int,
         raise ValueError("请先确认最终方案")
     if case.procurement_order is not None:
         return case.procurement_order  # Refresh/repeated click cannot collect another deposit.
+    if case.supplier_order_id or case.booking_route == "supplier":
+        raise ValueError("本案已进入酒店餐饮预订，请继续处理原订单")
     if not math.isfinite(quote) or quote <= 0 or nights not in range(8) or grade not in GRADE_NAMES or max_transfer < 0:
         raise ValueError("模拟报价或住宿条件无效")
     quote = round(quote, 2)

@@ -1,10 +1,14 @@
 """Executor-owned simulated hotel/meal contacts; program-owned stock and money."""
+from contextlib import closing
 from datetime import date
 from hashlib import sha256
 import json
+import sqlite3
 import time
 
+from src import company_store, storage
 from src.company_store import transaction, read_record, SimulationConflict, cash_event
+from src.models import CaseStatus
 from src.supplier_models import (BookingNeed, SupplierWorld, Hotel, Restaurant, SupplierOrder,
     SupplierQuote, ContactPlan, ContactAction, identifier)
 from src.operations import redeem_coupon, owner_only
@@ -26,11 +30,15 @@ def fixed_world(need):
         price_per_person_cents=8000,menu=["荤菜搭配","时蔬","主食与汤"],dietary_note="偏辣，清淡餐与过敏需事先确认"),
         Restaurant(id="meal-b",name="模拟餐厅B",seats_by_meal={m.key:need.people+20 for m in need.meals},
         price_per_person_cents=10000,menu=["荤菜三款","时蔬两款","主食与汤","清淡备选"],dietary_note=need.dietary)]
-    return SupplierWorld(hotels=hotels,restaurants=restaurants)
+    return SupplierWorld(hotels=hotels if need.include_hotel else [],restaurants=restaurants)
 
 
 def validate_world(world,need):
     world=SupplierWorld.model_validate(world)
+    if need.include_hotel and len(world.hotels)<2:
+        raise ValueError("住宿询价至少需要两家模拟酒店")
+    if not need.include_hotel and world.hotels:
+        raise ValueError("仅餐饮需求不需要生成酒店")
     suppliers=[*world.hotels,*world.restaurants]
     if len({s.id for s in suppliers}) != len(suppliers):
         raise ValueError("模拟供方编号不能重复")
@@ -50,6 +58,32 @@ def validate_world(world,need):
 def load_order(order_id):
     record,revision=read_record("supplier_order",order_id)
     return SupplierOrder.model_validate(record),revision
+
+
+def order_for_case(case_id):
+    path = company_store.COMPANY_DB
+    if not path.exists():
+        return None
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+        if not connection.execute("SELECT 1 FROM sqlite_master WHERE name='records'").fetchone():
+            return None
+        orders = company_store.Records(connection).all("supplier_order")
+    return next((order["id"] for order in orders
+                 if order.get("case_id") == case_id and order["status"] != "cancelled"), None)
+
+
+def find_case_booking(case):
+    if case.supplier_order_id:
+        return case.supplier_order_id
+    if (case.service_mode == "travel_planning" and case.status == CaseStatus.COMPLETED
+            and not (case.procurement_order or case.journey_demo)):
+        return order_for_case(case.id)
+    return None
+
+
+def linked_case_for_order(case_id, order_id):
+    case = storage.load_case_from_disk(case_id) if case_id else None
+    return case if case and find_case_booking(case) == order_id else None
 
 
 def _load(tx,order_id,expected_revision=None):
@@ -91,11 +125,13 @@ async def generate_world(order_id):
         return order
     started=time.monotonic()
     world=await run_structured(build_agent_team().fulfillment,
-        "这是执行Agent调用的模拟供方场景生成工具，不是搜集真实酒店资料。一次生成2至3家虚构酒店和2至3家虚构餐厅。"
+        "这是执行Agent调用的模拟供方场景生成工具。一次生成2至3家虚构餐厅；需要住宿时再生成2至3家虚构酒店。"
         "名称以模拟开头，编号唯一；每家覆盖全部所需夜晚或餐次。金额单位是分，不是元。"
-        "至少一家酒店第二晚房量不足，至少一家酒店与餐厅容量满足需求。火源活动条件分别列支持/不支持/待核实；"
+        "需要住宿时至少一家酒店容量满足需求，有第二晚时至少一家酒店第二晚房量不足。"
+        "至少一家餐厅容量满足需求。火源活动条件分别列支持/不支持/待核实；"
         "不得声称取得真实许可或真实预订。菜单简短。该场景随后保存，后续库存和金额均由程序维护。"
-        f"已确认需求：{order.need.model_dump_json()}；每晚需要双床房{order.need.rooms}间，"
+        f"已确认需求：{order.need.model_dump_json()}；每晚需要双床房{order.need.rooms}间。"
+        "若include_hotel为false，hotels必须为空。"
         f"酒店夜晚键：{json.dumps(order.need.nights)}；餐次键：{json.dumps([m.key for m in order.need.meals],ensure_ascii=False)}",SupplierWorld)
     world=validate_world(world,order.need)
     with transaction() as tx:
@@ -226,8 +262,8 @@ def _selected(order,ids=None,check_valid=True):
             if not quote.capacity_ok:
                 raise ValueError("供应能力不足，客户或老板同意也不能生成不存在的房量或餐位")
         selected.append(quote)
-    if len([q for q in selected if q.kind=="hotel"])!=1:
-        raise ValueError("首版需选择一家满足全员连续住宿的酒店")
+    if sum(q.kind=="hotel" for q in selected)!=int(order.need.include_hotel):
+        raise ValueError("住宿需选择一家满足连续房量的酒店，纯餐饮订单只选餐饮报价")
     covered=[key for q in selected if q.kind=="restaurant" for key in q.meal_keys]
     if sorted(covered)!=sorted(m.key for m in order.need.meals):
         raise ValueError("必须覆盖全部餐次，且每餐只能预订一次")
@@ -253,11 +289,14 @@ def contract(order,ids=None,check_valid=True):
         for day,cost in daily.items():
             if cost>order.need.daily_meal_budget_cents*order.need.people:
                 conditions[f"meal_budget:{day}"]=f"{day}餐饮{cost/100:.2f}元超过原日预算，客户确认接受本次明确报价"
-    hotel=next(q for q in selected if q.kind=="hotel")
-    if _supplier(order,"hotel",hotel.supplier_id).breakfast_included and any(k.endswith(":早餐") for q in selected for k in q.meal_keys):
+    hotel=next((q for q in selected if q.kind=="hotel"), None)
+    if hotel and _supplier(order,"hotel",hotel.supplier_id).breakfast_included and any(k.endswith(":早餐") for q in selected for k in q.meal_keys):
         conditions["external_breakfast"]="酒店含早餐，客户仍明确选择另订早餐"
     cost=sum(q.total_cents for q in selected)
     gross=cost+order.service_fee_cents
+    if order.need.event_budget_cents and gross-order.discount_cents>order.need.event_budget_cents:
+        conditions["event_budget"]=(f"本次报价超过团建原总预算 ¥{order.need.event_budget_cents/100:,.2f}，"
+                                    "请确认是否接受本笔报价")
     return {"resource_cents":cost,"gross_cents":gross,"net_cents":gross-order.discount_cents,"conditions":conditions,
         "signature":signature({"quotes":[q.model_dump(mode="json") for q in selected],"fee":order.service_fee_cents})}
 
@@ -403,6 +442,10 @@ def finish_service(order_id,actor="customer"):
             raise ValueError("资源尚未确认，不能完成服务")
         if order.status=="completed":
             return order
+        if order.status == "confirmed":
+            case = linked_case_for_order(order.case_id, order.id)
+            if case and not linked_delivery_ready(case, order):
+                raise ValueError("请先在原团建案件确认更新后的执行行程")
         order.delivered=True
         summary=contract(order,check_valid=False)
         remaining=summary["net_cents"]-order.customer_paid_cents
@@ -441,6 +484,11 @@ def linked_execution(case,order):
     key=signature({"order":order.id,"quotes":order.selected_quote_ids,"conditions":order.accepted_conditions,
         "plan_version":case.plan_version,"original":original})
     return updated,key,updated!=original
+
+
+def linked_delivery_ready(case, order):
+    _, signature, changed = linked_execution(case, order)
+    return not changed or case.supplier_execution_signature == signature
 
 
 def confirm_linked_execution(case,actor="customer"):

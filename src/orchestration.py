@@ -58,6 +58,16 @@ def lifecycle(case):
     if case.journey_demo:
         return {"finished": "活动完成，待结算", "running": "活动执行中",
             "awaiting_owner": "活动暂停，待老板决定", "awaiting_organizer": "活动暂停，待客户确认"}.get(case.journey_demo.status, "活动执行与异常处理")
+    if case.supplier_order_id:
+        from src.supplier_simulation import load_order
+        try:
+            order,_=load_order(case.supplier_order_id)
+        except ValueError:
+            return "酒店餐饮预订记录待核实"
+        return {"inquiring":"正在询价","waiting_customer":"待客户确认报价",
+            "customer_confirmed":"待付预付款","paid":"待确认供方预订",
+            "confirmed":"资源已确认，待交付","delivered":"待结清供方",
+            "completed":"订单完成并结算"}.get(order.status,"酒店餐饮预订处理中")
     if case.procurement_order:
         return {"ready": "资源已确认，待活动开始", "waiting_owner": "预订待老板审批",
             "waiting_customer": "预订待客户确认", "held": "预订暂停"}.get(case.procurement_order.status, "资源预订中")

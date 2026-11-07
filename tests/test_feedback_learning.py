@@ -208,6 +208,19 @@ class FeedbackLearningTests(unittest.TestCase):
         self.assertEqual(self.workflow.organization.constraints, [])
         self.assertEqual(case.personality_snapshots["夏橙"].history, [])
 
+    def test_verified_question_can_reach_owner_then_return_to_direction(self):
+        case = self.case()
+        case.status = CaseStatus.WAITING_STYLE_FEEDBACK
+        assessment = self.complaint(case)
+        assessment.requires_owner = True
+        with patch("src.workflow.run_structured", new=AsyncMock(return_value=assessment)):
+            asyncio.run(self.workflow.submit_style_feedback(
+                case, CustomerStyleFeedback(question="为何安排强制徒步？"), question_only=True))
+        self.assertEqual(case.status, CaseStatus.WAITING_OWNER)
+        self.assertIsNotNone(case.approval)
+        asyncio.run(self.workflow.submit_owner_decision(case, True))
+        self.assertEqual(case.status, CaseStatus.WAITING_STYLE_FEEDBACK)
+
     def test_fabricated_complaint_does_not_create_check(self):
         case = self.case()
         case.status = CaseStatus.WAITING_STYLE_FEEDBACK

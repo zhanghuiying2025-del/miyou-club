@@ -757,6 +757,7 @@ class TravelCase(BaseModel):
     journey_demo: JourneyDemo | None = None
     journey_history: list[JourneyDemo] = Field(default_factory=list)
     procurement_order: ProcurementOrder | None = None
+    booking_route: Literal["", "supplier"] = ""
     supplier_order_id: str | None = None
     supplier_execution_schedule: list[str] = Field(default_factory=list)
     supplier_execution_signature: str = ""

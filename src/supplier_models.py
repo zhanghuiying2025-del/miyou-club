@@ -23,11 +23,14 @@ class BookingNeed(BaseModel):
     check_out: date
     men: int = Field(ge=0,le=2000)
     women: int = Field(ge=0,le=2000)
+    include_hotel: bool = True
+    participant_count: int | None = Field(default=None, ge=1, le=2000)
     meals: list[MealSlot] = Field(min_length=1,max_length=42)
     preferred_style: str = Field(default="", max_length=300)
     team_profile: str = Field(default="", max_length=100)
     desired_outcomes: list[str] = Field(default_factory=list)
     activity_notes: str = Field(default="", max_length=1000)
+    event_budget_cents: int | None = Field(default=None,gt=0)
     daily_meal_budget_cents: int | None = Field(default=None,gt=0,le=1000000)
     hotel_grade: int = Field(default=2,ge=1,le=3)
     require_bonfire: bool = False
@@ -36,8 +39,11 @@ class BookingNeed(BaseModel):
 
     @model_validator(mode="after")
     def validate_need(self):
-        if not 1 <= (self.check_out-self.check_in).days <= 14 or not 1 <= self.people <= 2000:
-            raise ValueError("住宿需1至14晚，参与人数需1至2000人")
+        min_days=1 if self.include_hotel else 0
+        if not min_days <= (self.check_out-self.check_in).days <= 14 or not 1 <= self.people <= 2000:
+            raise ValueError("预订日期或参与人数无效，住宿需1至14晚")
+        if self.include_hotel and self.men+self.women != self.people:
+            raise ValueError("住宿分房人数必须等于团建参与人数")
         if len({m.key for m in self.meals}) != len(self.meals):
             raise ValueError("同一天同一餐不能重复")
         if any(not self.check_in <= m.day <= self.check_out for m in self.meals):
@@ -46,14 +52,16 @@ class BookingNeed(BaseModel):
 
     @property
     def people(self):
-        return self.men+self.women
+        return self.participant_count or self.men+self.women
 
     @property
     def rooms(self):
-        return (self.men+1)//2+(self.women+1)//2
+        return (self.men+1)//2+(self.women+1)//2 if self.include_hotel else 0
 
     @property
     def nights(self):
+        if not self.include_hotel:
+            return []
         return [(self.check_in+timedelta(days=i)).isoformat() for i in range((self.check_out-self.check_in).days)]
 
 
@@ -82,7 +90,7 @@ class Restaurant(BaseModel):
 
 
 class SupplierWorld(BaseModel):
-    hotels: list[Hotel] = Field(min_length=2,max_length=4)
+    hotels: list[Hotel] = Field(max_length=4)
     restaurants: list[Restaurant] = Field(min_length=2,max_length=4)
 
 

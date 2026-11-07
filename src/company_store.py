@@ -74,12 +74,15 @@ def read_record(kind, key):
         return tx.get(kind, key)
 
 
-def finance_summary(tx):
-    events = tx.events("cash")
+def summarize_cash_events(events):
     incoming = sum(e["cents"] for e in events if e["direction"] == "in")
     outgoing = sum(e["cents"] for e in events if e["direction"] == "out")
     return {"opening_cents":4600000,"incoming_cents":incoming,"outgoing_cents":outgoing,
             "cash_cents":4600000+incoming-outgoing,"reserve_cents":1500000}
+
+
+def finance_summary(tx):
+    return summarize_cash_events(tx.events("cash"))
 
 
 def cash_event(tx, key, entity_id, cents, direction, purpose):

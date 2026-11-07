@@ -79,6 +79,12 @@ def decode_response(response_model, payload):
         or (response_model is CouncilDecision and "rationale" in payload and "basis" not in payload))
     if legacy or response_model not in WIRE_MODELS:
         return response_model.model_validate(payload)
+    plan = payload.get("plan") if response_model is ManagedPlan else payload
+    if response_model in {ManagedPlan, CouncilDecision} and isinstance(plan, dict):
+        basis = plan.get("basis")
+        if isinstance(basis, list) and len(basis) > 4 and all(isinstance(item, str) for item in basis):
+            plan = {**plan, "basis": basis[:4]}
+            payload = {**payload, "plan": plan} if response_model is ManagedPlan else plan
     value = wire_model(response_model).model_validate(payload)
     if response_model is CouncilDecision:
         return _plan(value)

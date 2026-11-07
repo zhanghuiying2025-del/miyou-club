@@ -76,6 +76,23 @@ def get_document(document_id):
     return next((item for item in documents() if item["id"] == document_id), None)
 
 
+def case_outcome(document):
+    if document["status"] in {"failed", "cancelled"}:
+        return "失败"
+    if document["stage"] == "completed":
+        return "成功"
+    if document["service"] == "activity_review" and document["status"] == "completed":
+        journey = document["snapshot"].get("journey_demo")
+        if not journey or journey.get("status") == "finished":
+            return "成功"
+    return "未完成"
+
+
+def hidden_documents(docs, hidden_ids):
+    return {doc["id"] for doc in docs if doc["id"] in hidden_ids
+            or (doc["kind"] == "supplier" and f"case:{doc['snapshot'].get('case_id')}" in hidden_ids)}
+
+
 def fragments(document):
     """Split by business meaning, with exact field paths retained for verification."""
     raw = document["snapshot"]

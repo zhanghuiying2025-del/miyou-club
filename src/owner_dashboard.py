@@ -9,6 +9,7 @@ from src.journey import pending_event
 from src.models import CaseStatus, TravelCase
 from src.runtime import active_jobs, progress_events
 from src.supplier_models import SupplierOrder
+from src.workflow import TravelAgencyWorkflow
 
 
 _CUSTOMER_STAGES = {
@@ -131,7 +132,7 @@ def _supplier_flow(order, case=None):
             return "待客户确认当前报价", "客户", "报价已变更，需要客户重新确认", False
         if order.supplier_paid_cents < (summary["resource_cents"] * 30 + 50) // 100:
             return "待授权模拟供方定金", "老板", "客户已预付，需授权供方定金", True
-        return "待取得模拟预订回执", "履约执行", "已记录供方定金授权", False
+        return "待提交模拟预订", "老板", "供方定金已授权，请点击执行工具提交预订并获取回执", True
     if order.status == "confirmed":
         if case:
             _, signature, changed = supplier_simulation.linked_execution(case, order)
@@ -163,6 +164,8 @@ def _case_flow(case, supplier):
             return "待客户确认收到审核清单", "客户", case.error_message or "", False
         return "审核文档中", "项目经理", case.error_message or "", False
     if case.status == CaseStatus.WAITING_OWNER and case.approval:
+        if TravelAgencyWorkflow.customer_decision_exhausted(case):
+            return "审批暂缓，待客户补充", "客户", "；".join(case.approval.reasons), False
         return case.approval.title, "老板", "；".join(case.approval.reasons), True
     if supplier:
         return _supplier_flow(supplier, case)
@@ -171,6 +174,8 @@ def _case_flow(case, supplier):
     if case.status in _CUSTOMER_STAGES:
         return _CUSTOMER_STAGES[case.status], "客户", "", False
     if case.status == CaseStatus.COMPLETED:
+        if case.booking_route == "supplier":
+            return "待继续酒店餐饮预订", "客户", "预订需求已开始，等待取得报价", False
         return "方案已确认，待下单", "客户", "", False
     if case.status == CaseStatus.FAILED:
         if case.approval and case.approval.approved is False and not case.resume_status:
@@ -197,7 +202,7 @@ def _order_row(kind, source_id, title, flow, case_id=None, supplier_order_id=Non
     }
 
 
-def _after_approval(case, supplier):
+def _after_approval(case, supplier, stage):
     if case and case.status == CaseStatus.WAITING_OWNER:
         if case.pending_owner_step:
             stage, actor = _TEAM_STAGES.get(case.pending_owner_step, ("推进案件", "项目团队"))
@@ -209,7 +214,9 @@ def _after_approval(case, supplier):
         return "客户确认最终方案"
     if supplier:
         if supplier.status == "paid":
-            return "履约执行提交模拟预订并获取回执"
+            if stage == "待提交模拟预订":
+                return "工具返回模拟预订回执，客户继续核对行程或确认交付"
+            return "老板点击执行工具提交模拟预订并获取回执"
         if supplier.status == "delivered":
             return "程序登记供方支出并完成模拟结算"
         return "客户确认活动调整"
@@ -222,7 +229,7 @@ def _after_approval(case, supplier):
 
 def _order_details(row, case, supplier):
     if row["needs_owner"]:
-        row["after_approval"] = _after_approval(case, supplier)
+        row["after_approval"] = _after_approval(case, supplier, row["stage"])
     if supplier:
         row["events"] = [
             {"执行方": "履约执行", "动作": "取得模拟预订回执",
@@ -368,6 +375,7 @@ def _supplier_results(orders, leads, campaigns, cash):
         })
     rows = [{
         "业务": "酒店餐饮", "订单": _supplier_title(order), "订单编号": order.id,
+        "客户已付金额": order.customer_paid_cents / 100,
         "已确认净服务费收入": (order.service_fee_cents - order.discount_cents) / 100,
         "已结清供方支出": order.supplier_paid_cents / 100,
     } for order in settled]
@@ -384,25 +392,38 @@ def load_owner_dashboard():
     supplier_metrics, campaign_rows, supplier_rows = _supplier_results(suppliers, leads, campaigns, cash)
 
     orders, tasks = [], []
+    paid_cases, settled_cases = set(), set()
     supplier_by_id = {order.id: order for order in suppliers}
+    supplier_by_case = {}
+    for supplier in suppliers:
+        if supplier.case_id and supplier.status != "cancelled":
+            supplier_by_case.setdefault(supplier.case_id, supplier)
     linked = set()
     for case in cases:
         supplier = supplier_by_id.get(case.supplier_order_id)
-        if not supplier and not case.procurement_order:
-            candidates = [order for order in suppliers if order.case_id == case.id]
-            if len(candidates) == 1:
-                supplier = candidates[0]
+        if (not case.supplier_order_id and case.service_mode == "travel_planning" and case.status == CaseStatus.COMPLETED
+                and not (case.procurement_order or case.journey_demo)):
+            supplier = supplier_by_case.get(case.id)
         row = _order_row(
             "case", case.id, _case_title(case), _case_flow(case, supplier),
             case_id=case.id, supplier_order_id=supplier.id if supplier else None,
         )
         if case.procurement_order:
             row["procurement_order_id"] = case.procurement_order.id
+            if any(p.kind in {"customer_deposit", "customer_balance"} and p.amount_yuan > 0
+                   for p in case.procurement_order.payments):
+                paid_cases.add(case.id)
+            if case.procurement_order.settled:
+                settled_cases.add(case.id)
         _order_details(row, case, supplier)
         orders.append(row)
         tasks.extend(_case_tasks(row, case))
         if supplier:
             linked.add(supplier.id)
+            if supplier.status != "cancelled" and supplier.customer_paid_cents > 0:
+                paid_cases.add(case.id)
+            if supplier.status == "completed":
+                settled_cases.add(case.id)
             tasks.extend(_tasks_for(row, supplier.id, supplier.handoffs))
     for supplier in suppliers:
         if supplier.id in linked:
@@ -419,5 +440,7 @@ def load_owner_dashboard():
     tasks.sort(key=lambda task: task_order.get(task["status"], 4))
     return {
         "travel": travel, "supplier": supplier_metrics, "orders": orders, "tasks": tasks,
+        "main_orders": {"paid": len(paid_cases), "settled": len(settled_cases)},
+        "supplier_cash": company_store.summarize_cash_events(cash),
         "campaigns": campaign_rows, "settled": travel_rows + supplier_rows,
     }

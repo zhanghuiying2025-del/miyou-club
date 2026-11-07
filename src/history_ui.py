@@ -4,36 +4,47 @@ import os
 
 import streamlit as st
 
-from src.history_archive import KIND_LABELS, STATUS_LABELS, get_document
+from src.history_archive import KIND_LABELS, STATUS_LABELS, case_outcome, get_document, hidden_documents
 from src.history_search import sync_index, search, set_active
+from src.storage import hidden_archive_ids, set_archive_hidden
+from src.supplier_simulation import linked_case_for_order
 from src.visits import resume_for_customer, resume_supplier, remember_view, new_customer
+
+
+def _case_id_for_archive(doc):
+    if doc["kind"] == "case":
+        return doc["source_id"]
+    linked = linked_case_for_order(doc["snapshot"].get("case_id"), doc["source_id"])
+    return linked.id if linked else None
 
 
 def _resume(document_id):
     doc = get_document(document_id)
     if not doc:
         return
-    if doc["kind"] == "case":
-        resume_for_customer(doc["source_id"])
+    case_id = _case_id_for_archive(doc)
+    if case_id:
+        resume_for_customer(case_id)
     else:
         new_customer()
         resume_supplier(doc["source_id"])
-        if doc["snapshot"].get("case_id"):
-            remember_view(customer_case_id=doc["snapshot"]["case_id"])
 
 
 def _owner_open(document_id):
     doc = get_document(document_id)
     if not doc:
         return
-    if doc["kind"] == "case":
-        remember_view(owner_case_id=doc["source_id"], work_area="团建策划与交付")
-        st.session_state["owner_history_select"] = doc["source_id"]
+    case_id = _case_id_for_archive(doc)
+    if case_id:
+        area = "团建策划与交付"
+        remember_view(owner_case_id=case_id, work_area=area)
+        st.session_state["owner_history_select"] = case_id
     else:
-        remember_view(owner_supplier_order_id=doc["source_id"], work_area="酒店餐饮模拟预订")
+        area = "酒店餐饮模拟预订"
+        remember_view(owner_supplier_order_id=doc["source_id"], work_area=area)
         st.session_state["supplier_order_select_owner"] = doc["source_id"]
     st.session_state.pop("case", None)
-    st.session_state["work_area"] = "团建策划与交付" if doc["kind"] == "case" else "酒店餐饮模拟预订"
+    st.session_state["work_area"] = area
 
 
 def _reference_cards(rows):
@@ -61,6 +72,51 @@ def render_case_references(case):
             st.caption("已提供给：" + ("、".join(supplied) or "尚未提供") + "。此记录仅证明资料已提供，不证明已执行或产生效果。")
 
 
+def _render_case_categories(docs, hidden_ids):
+    st.caption("团建和预订以履约结算为成功；活动审核以客户确认收到清单为准，有执行订单的还需完成执行。失败和未完成都归入问题案例。")
+    st.caption("删除仅从老板端的案例与历史档案列表移除。公司原始档案、订单和流水仍保存在本地，当前演示尚未接入外部公司数据库。")
+    st.caption("进行中的订单仍可在「订单与风险」处理。可在「已移除」恢复显示。")
+    case_ids = {doc["source_id"] for doc in docs if doc["kind"] == "case"}
+    groups = {"成功案例": [], "问题案例": [], "已移除": []}
+    for doc in docs:
+        if doc["kind"] == "supplier" and doc["snapshot"].get("case_id") in case_ids:
+            continue
+        outcome = case_outcome(doc)
+        group = "已移除" if doc["id"] in hidden_ids else "成功案例" if outcome == "成功" else "问题案例"
+        groups[group].append((doc, outcome))
+    group = st.radio("案例分类", list(groups), horizontal=True, key="archive_case_group",
+                     format_func=lambda name: f"{name}（{len(groups[name])}）")
+    cases = groups[group]
+    if not cases:
+        st.info(f"暂无{group}。")
+        return
+    st.dataframe([{"案例": doc["title"], "城市": doc["city"], "结果": outcome,
+                   "编号": doc["source_id"]} for doc, outcome in cases],
+                 hide_index=True, use_container_width=True)
+    options = {doc["id"]: doc for doc, _ in cases}
+    key = "archive_case_selection"
+    if st.session_state.get(key) not in options:
+        st.session_state.pop(key, None)
+    chosen = st.selectbox("选择案例", list(options), key=key,
+                          format_func=lambda value: options[value]["title"][:40] + " · " + options[value]["source_id"])
+    restoring = group == "已移除"
+    if restoring:
+        submitted = st.button("恢复到列表", key="archive_restore")
+    else:
+        first, second = st.columns(2)
+        first.button("打开案例", on_click=_owner_open, args=(chosen,), key="archive_case_open")
+        with second.popover("删除案例"):
+            st.write("确认将此案例从列表移除？")
+            submitted = st.button("确认移除", key="archive_remove:" + chosen)
+    if submitted:
+        try:
+            set_archive_hidden(chosen, not restoring)
+        except OSError:
+            st.error("未能保存列表设置，请检查本地档案目录权限后重试。")
+        else:
+            st.rerun()
+
+
 def render_history_workspace(owner=False):
     st.header("历史订单管理")
     if not owner:
@@ -69,16 +125,20 @@ def render_history_workspace(owner=False):
     st.caption("所有订单保留完整档案；另建可重建的片段索引。浏览、搜索和恢复不会重新付款或调用策划模型。")
     try:
         docs, rows = sync_index()
+        hidden_ids = hidden_documents(docs, hidden_archive_ids())
     except Exception:
         st.error("历史档案或索引读取失败，请检查文件是否完整及目录权限；原订单未被修改。")
         return
-    a, b, c = st.columns(3)
-    a.metric("策划/活动案件", sum(d["kind"] == "case" for d in docs))
-    b.metric("酒店餐饮订单", sum(d["kind"] == "supplier" for d in docs))
-    c.metric("可用检索片段", sum(r["active"] for r in rows))
-    st.caption("同一业务的策划案与预订合同分别计数，不作为独立客户数或收入统计。")
-    archive_tab, search_tab = st.tabs(["完整订单档案", "经验检索与索引"])
+    categories_tab, archive_tab, search_tab = st.tabs(["案例归类", "完整订单档案", "经验检索与索引"])
+    with categories_tab:
+        _render_case_categories(docs, hidden_ids)
+    docs = [d for d in docs if d["id"] not in hidden_ids]
     with archive_tab:
+        a, b, c = st.columns(3)
+        a.metric("策划/活动案件", sum(d["kind"] == "case" for d in docs))
+        b.metric("酒店餐饮订单", sum(d["kind"] == "supplier" for d in docs))
+        c.metric("可见检索片段", sum(r["active"] and r["document_id"] not in hidden_ids for r in rows))
+        st.caption("同一业务的策划案与预订合同分别计数。")
         left, right = st.columns(2)
         category = left.selectbox("订单类型", ["全部", "策划/活动案件", "酒店餐饮订单"], key="history_category")
         stage = right.selectbox("履约阶段", ["全部", *STATUS_LABELS.values()], key="history_stage")
@@ -141,7 +201,8 @@ def render_history_workspace(owner=False):
                 try:
                     with st.spinner("检索历史记录，不调用 MiMo…"):
                         found = search(query, city="" if city == "全部" else city,
-                            kind=next((k for k,v in KIND_LABELS.items() if v == kind), ""), limit=8)
+                            kind=next((k for k,v in KIND_LABELS.items() if v == kind), ""), limit=8,
+                            exclude_document_ids=hidden_ids)
                     st.caption(found["backend"] + f" · 返回 {len(found['rows'])} 条")
                     if found["notice"]:
                         st.info(found["notice"])

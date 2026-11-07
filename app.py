@@ -22,7 +22,7 @@ from src import activity_order
 from src.feedback_ui import render_feedback_records
 from src.journey_ui import render_journey_demo, render_journey_owner
 from src.procurement_ui import render_procurement
-from src.storage import CaseConflictError, delete_case_from_disk, load_case_from_disk, save_case_to_disk, list_saved_cases
+from src.storage import CaseConflictError, hidden_archive_ids, load_case_from_disk, save_case_to_disk, list_saved_cases
 from src.visits import initialize_visit,remember_view,bind_case,new_customer,resume_for_customer
 from src.workflow import TravelAgencyWorkflow, WorkflowError
 from src.orchestration import handoffs_for, lifecycle
@@ -33,7 +33,8 @@ from src.activity_review import review_activity
 from src.activity_review_ui import render_activity_request, render_activity_case
 from src.document_intake import intake_documents
 from src.document_intake_ui import render_document_upload, render_document_confirmation
-from src.supplier_ui import render_supplier_workspace
+from src.supplier_ui import render_case_booking_request, render_supplier_workspace
+from src.supplier_simulation import find_case_booking, load_order as load_supplier_order
 from src.history_ui import render_history_workspace, render_case_references
 from src.organization import load_organization_state
 from src.owner_dashboard import load_owner_dashboard
@@ -143,7 +144,7 @@ def get_case():
         try:
             if not isinstance(case, TravelCase) or not all(hasattr(case, field) for field in (
                 "handoffs", "document_intake", "planning_protocol", "supplier_order_id",
-                "supplier_execution_signature", "history_references", "pending_supplement",
+                "supplier_execution_signature", "history_references", "pending_supplement", "booking_route",
             )):
                 raw_case = case.model_dump(mode="python") if hasattr(case, "model_dump") else case
                 case = TravelCase.model_validate(raw_case)
@@ -190,6 +191,16 @@ def save_case(case):
 
 def sync_current_case():
     return get_case()
+
+
+def restore_case_booking(case):
+    if case.supplier_order_id:
+        return
+    order_id = find_case_booking(case)
+    if order_id:
+        case.booking_route = "supplier"
+        case.supplier_order_id = order_id
+        save_case(case)
 
 
 def proposal_image(opinion, case):
@@ -255,6 +266,11 @@ def process_case(workflow, case, title: str, attachments=None, action: str = "ad
                     case.requirements.hard_constraints.extend(insight.constraints)
         if action == "style":
             return await workflow.submit_style_feedback(case, feedback)
+        if action == "style_question":
+            return await workflow.submit_style_feedback(case, feedback, question_only=True)
+        if action == "style_revision":
+            await workflow.revise_direction(case, comment)
+            return case
         if action == "draft":
             return await workflow.submit_draft_feedback(case, adjustments or [], comment)
         if action == "rework":
@@ -333,6 +349,8 @@ def process_case(workflow, case, title: str, attachments=None, action: str = "ad
             try:
                 return run_async(execute())
             except Exception as exc:
+                if action in {"style_question", "style_revision"} and case.status == CaseStatus.WAITING_STYLE_FEEDBACK:
+                    raise WorkflowError("本次处理未完成，当前方向仍可查看。请重试。") from exc
                 if case.status not in {CaseStatus.FAILED, CaseStatus.NEEDS_REWORK}:
                     case.resume_status, case.status = case.status, CaseStatus.FAILED
                 case.error_message = str(exc)
@@ -378,6 +396,21 @@ def process_case(workflow, case, title: str, attachments=None, action: str = "ad
     return case
 
 
+def render_itinerary_details(plan, *, expanded=False):
+    with st.expander("查看行程细节", expanded=expanded):
+        st.markdown("#### 按顺序查看安排")
+        for index, item in enumerate(plan.schedule, 1):
+            st.write(f"{index}. {item}")
+        if plan.rationale:
+            st.markdown("#### 为什么这样安排")
+            for item in plan.rationale:
+                st.write(f"- {item}")
+        if plan.items_to_verify:
+            st.markdown("#### 落地前待核实")
+            for item in plan.items_to_verify:
+                st.info(item)
+
+
 def show_final_plan(case, show_internal_details: bool = False):
     plan = case.council_decision
     if plan is None:
@@ -390,18 +423,7 @@ def show_final_plan(case, show_internal_details: bool = False):
     st.image(route, caption="活动顺序示意，不代表真实地理位置和导航路线", use_container_width=True)
     st.download_button("下载行程顺序图", route, file_name=f"行程图-{case.id}.png", mime="image/png", key=f"route_{case.id}_{show_internal_details}")
 
-    st.markdown("#### 建议行程")
-    for item in plan.schedule:
-        st.write(f"- {item}")
-
-    st.markdown("#### 为什么这样安排")
-    for item in plan.rationale:
-        st.write(f"- {item}")
-
-    if plan.items_to_verify:
-        st.markdown("#### 落地前待核实")
-        for item in plan.items_to_verify:
-            st.info(item)
+    render_itinerary_details(plan, expanded=show_internal_details)
 
     if plan.customer_notice:
         st.markdown("#### 重要提醒")
@@ -537,15 +559,32 @@ def render_style_selection(workflow, case):
                     st.write(f"- {method}")
                 for example in case.style_template.get("examples", []):
                     st.caption(f"满意方案 {example['case_id']} · 第{example['version']}版")
-        with st.form(f"style_branch_{case.id}_{case.plan_version}"):
-            with st.expander("对提案有疑问或投诉？"):
-                question = st.text_input("想问的问题")
-                complaint = st.text_area("投诉内容")
-            submitted = st.form_submit_button("确认方向，查看草案", type="primary")
-        if submitted:
+        if case.feedback_assessment:
+            st.info(case.feedback_assessment.customer_response)
+        with st.expander("质疑"):
+            with st.form(f"direction_question_{case.id}_{case.plan_version}"):
+                question = st.text_area("质疑内容", max_chars=2000)
+                ask = st.form_submit_button("提交质疑")
+        with st.expander("修改方案"):
+            with st.form(f"direction_revision_{case.id}_{case.plan_version}"):
+                reason = st.text_area("修改理由", max_chars=2000,
+                                      placeholder="例如，多数成员已去过鼓楼和什刹海，希望换两个地点。")
+                revise = st.form_submit_button("提交修改")
+        confirm = st.button("确认方向，查看草案", type="primary")
+        if ask or revise or confirm:
             try:
-                process_case(workflow, case, "团队正在核查并整理草案……", action="style",
-                             feedback=CustomerStyleFeedback(question=question, complaint=complaint))
+                if ask:
+                    if not question.strip():
+                        raise WorkflowError("请填写质疑内容")
+                    process_case(workflow, case, "项目经理正在核查你的质疑……", action="style_question",
+                                 feedback=CustomerStyleFeedback(question=question.strip()))
+                elif revise:
+                    if not reason.strip():
+                        raise WorkflowError("请填写修改理由")
+                    process_case(workflow, case, "策划正在调整团建方向……", action="style_revision", comment=reason.strip())
+                else:
+                    process_case(workflow, case, "团队正在核查并整理草案……", action="style",
+                                 feedback=CustomerStyleFeedback())
                 st.rerun()
             except WorkflowError as exc:
                 st.error(str(exc))
@@ -680,6 +719,7 @@ def render_draft_confirmation(workflow, case):
     st.write(f"**{plan.theme}**")
     st.write(plan.summary[:200])
     st.image(itinerary_diagram(plan.theme, tuple(plan.schedule)), caption="草案行程顺序图 · 非导航地图", use_container_width=True)
+    render_itinerary_details(plan)
     for notice in plan.customer_notice[:2]:
         st.caption(notice)
     with st.expander("查看本轮组合与取舍"):
@@ -744,7 +784,7 @@ def render_supplement(workflow, case, running=False):
         st.info(case.customer_questions[0])
     if running:
         st.caption("当前任务结束后暂停，补充内容会从保留的步骤处理。")
-    if case.procurement_order or case.supplier_order_id or case.journey_demo:
+    if case.procurement_order or case.supplier_order_id or case.booking_route or case.journey_demo:
         st.caption("涉及已建订单的补充将交给公司确认，付款和预订记录继续保留。")
     note = st.text_area("本次补充", max_chars=2000, key=f"customer_supplement_text:{case.id}",
                         placeholder="例如，两位成员行动不便，需要改为有电梯的路线。")
@@ -767,14 +807,36 @@ def render_supplement(workflow, case, running=False):
     return True
 
 
+def start_new_customer_order():
+    new_customer()
+    switch_customer_area(TRAVEL_AREA)
+
+
+def render_completed_order(case):
+    st.subheader("订单已完成")
+    st.success("履约评价已提交。")
+    if case.supplier_order_id:
+        render_supplier_workspace(order_id=case.supplier_order_id)
+    elif case.procurement_order:
+        render_procurement(case, save_case, sync=sync_current_case)
+    with st.expander("查看已确认的完整方案"):
+        show_final_plan(case)
+    st.button("开启新订单", type="primary", on_click=start_new_customer_order, key="customer_new_order")
+
+
 def render_customer_portal(workflow, case, request_type):
     if case is not None:
-        st.button("保存进度并开始新需求",on_click=new_customer,key="customer_new_request")
-        st.caption("已提交内容持续保存；开始新需求后，旧案件可在老板端历史记录中继续。")
         latest_learning = next((entry for entry in reversed(case.audit_log) if entry.action == "scenario_learned"), None)
         if latest_learning:
             st.success(latest_learning.detail)
+        if case.status == CaseStatus.COMPLETED and case.delivery_feedback is not None:
+            render_completed_order(case)
+            return
+        st.button("保存进度并开始新需求",on_click=new_customer,key="customer_new_request")
+        st.caption("已提交内容持续保存；开始新需求后，旧案件可在老板端历史记录中继续。")
     running = bool(case and any(j.key[0] == "planning" for j in active_jobs(case.id)))
+    if case and not running and workflow.restore_optional_question_wait(case):
+        save_case(case)
     if (case and case.service_mode == "travel_planning" and case.planning_mode == "style_branch"
             and (case.status != CaseStatus.WAITING_CUSTOMER or running)):
         if render_supplement(workflow, case, running):
@@ -813,7 +875,7 @@ def render_customer_portal(workflow, case, request_type):
         render_activity_case(workflow, case, process_case, save_case, sync=sync_current_case,
                              tracking_enabled=activity_order.TRACKING_ENABLED)
         return
-    if not case.procurement_order and not case.journey_demo:
+    if not (case.procurement_order or case.supplier_order_id or case.booking_route or case.journey_demo):
         with st.expander("文档是现成活动方案？改用审核与执行细化"):
             st.caption("重新上传原文后切换本案服务。原有记录保留，不再继续生成旅行提案。")
             render_document_upload(workflow, process_case, save_case, existing_case=case)
@@ -838,7 +900,9 @@ def render_customer_portal(workflow, case, request_type):
                 if insight.uncertainties:
                     st.caption("仍需核实：" + "；".join(insight.uncertainties))
 
-    if case.feedback_assessment:
+    if case.feedback_assessment and not (
+        case.planning_mode == "style_branch" and case.status == CaseStatus.WAITING_STYLE_FEEDBACK
+    ):
         with st.expander("公司对质疑或投诉的处理结果"):
             st.write(case.feedback_assessment.customer_response)
             st.caption(case.feedback_assessment.rationale)
@@ -854,6 +918,10 @@ def render_customer_portal(workflow, case, request_type):
         st.subheader("请补充会影响方案的关键信息")
         for question in case.customer_questions:
             st.info(question)
+        if case.planning_mode == "style_branch" and case.council_decision and case.council_decision.schedule:
+            with st.expander("查看当前草案", expanded=True):
+                st.caption("仍有关键条件待确认，确认后才能定稿。")
+                show_final_plan(case)
         answer = st.text_area("你的答复", max_chars=2000,
                               key=f"customer_answer:{case.id}:{case.clarification_rounds}")
         if st.button("提交补充信息", type="primary"):
@@ -872,15 +940,21 @@ def render_customer_portal(workflow, case, request_type):
     }:
         delivery_completed = bool(case.procurement_order and case.procurement_order.settled)
         if case.status == CaseStatus.COMPLETED:
+            restore_case_booking(case)
+            st.markdown("#### 方案已确认 · 继续预订")
             if case.supplier_order_id:
-                render_supplier_workspace(owner=False,order_id=case.supplier_order_id)
-                from src.supplier_simulation import load_order as load_supplier_order
                 linked_order,_=load_supplier_order(case.supplier_order_id)
                 delivery_completed = linked_order.status == "completed"
+                needs_schedule_confirmation = False
                 if linked_order.status in {"confirmed","delivered","completed"}:
                     from src.supplier_simulation import linked_execution,confirm_linked_execution
                     proposed,key,changed=linked_execution(case,linked_order)
-                    if changed and case.supplier_execution_signature!=key:
+                    needs_schedule_confirmation = changed and case.supplier_execution_signature != key
+                render_supplier_workspace(owner=False,order_id=case.supplier_order_id,
+                                          delivery_allowed=not needs_schedule_confirmation,
+                                          expected_status=linked_order.status)
+                if linked_order.status in {"confirmed","delivered","completed"}:
+                    if needs_schedule_confirmation:
                         st.warning("酒店餐饮合同已排除原火源活动，请确认行程变化。")
                         for before,after in zip(case.council_decision.schedule,proposed):
                             if before!=after:
@@ -893,12 +967,16 @@ def render_customer_portal(workflow, case, request_type):
                             st.rerun()
                     elif activity_order.TRACKING_ENABLED:
                         render_journey_demo(case,workflow.team,save_case,sync=sync_current_case)
-            else:
-                if case.council_decision and not (case.procurement_order or case.journey_demo):
-                    st.button("为本方案补充酒店餐饮需求", on_click=switch_customer_area,
-                              args=("酒店餐饮模拟预订",))
+            elif case.procurement_order or case.journey_demo:
                 render_procurement(case, save_case, sync=sync_current_case,
                                    allow_manual_delivery=not activity_order.TRACKING_ENABLED)
+            elif case.council_decision:
+                render_case_booking_request(case, save_case)
+                if not case.booking_route:
+                    with st.expander("使用原团建资源预订"):
+                        st.caption("包含场地和交通等资源。选择后，本案会沿这一路径继续预订。")
+                        render_procurement(case, save_case, sync=sync_current_case,
+                                           allow_manual_delivery=not activity_order.TRACKING_ENABLED)
             if activity_order.TRACKING_ENABLED and case.procurement_order and case.procurement_order.status == "ready":
                 render_journey_demo(case, workflow.team, save_case, sync=sync_current_case)
             with st.expander("查看已确认的完整方案"):
@@ -933,8 +1011,24 @@ def render_customer_portal(workflow, case, request_type):
             if delivery_completed:
                 render_customer_feedback(workflow, case)
 
+    elif case.status == CaseStatus.WAITING_OWNER and case.planning_mode == "style_branch":
+        st.info("方案仍有关键条件待核对，可以先看草案。")
+        if case.council_decision and case.council_decision.schedule:
+            with st.expander("查看当前草案", expanded=True):
+                show_final_plan(case)
     elif case.status == CaseStatus.FAILED:
-        st.warning("策划团队处理时遇到了问题，公司老板正在处理。你不需要重复提交需求。")
+        if (case.planning_mode == "style_branch" and case.creative_opinions and case.resume_status in {
+            CaseStatus.WAITING_STYLE_FEEDBACK, CaseStatus.CROSS_REVIEW, CaseStatus.DELIBERATION,
+        }):
+            st.warning("本次处理未完成，可以继续原案件。")
+            if st.button("返回方向，修改方案"):
+                case.status = CaseStatus.WAITING_STYLE_FEEDBACK
+                case.resume_status = None
+                case.error_message = None
+                save_case(case)
+                st.rerun()
+        else:
+            st.warning("策划团队处理时遇到了问题，公司老板正在处理。你不需要重复提交需求。")
     else:
         st.write("处理记录已保存，刷新不会清空需求。")
         automatic = {CaseStatus.NEW, CaseStatus.INTAKE, CaseStatus.ALIGNMENT,
@@ -1017,17 +1111,6 @@ def render_owner_overview(case):
     if case.council_decision:
         st.divider()
         show_final_plan(case, show_internal_details=True)
-
-    st.divider()
-    if st.button("删除当前案件", type="secondary"):
-        try:
-            delete_case_from_disk(case)
-        except CaseConflictError:
-            st.session_state["case"] = load_case_from_disk(case.id)
-            st.session_state["sync_notice"] = "案件刚刚在另一页面更新，请检查最新内容后再决定是否删除。"
-            st.rerun()
-        st.session_state.pop("case", None)
-        st.rerun()
 
 
 def render_owner_council(case):
@@ -1203,7 +1286,10 @@ def render_owner_approval(case):
         return
 
     st.warning(case.approval.title)
-    if case.customer_answer_pending or any(
+    exhausted = TravelAgencyWorkflow.customer_decision_exhausted(case)
+    if exhausted:
+        st.info("客户可从案件页补充关键条件。当前草案暂缓发布。")
+    elif case.customer_answer_pending or any(
         finding.decision_owner == "customer"
         for review in case.reviews for finding in review.findings
     ):
@@ -1212,7 +1298,7 @@ def render_owner_approval(case):
         st.write(f"- {reason}")
     comment = st.text_area("老板意见")
     left, right = st.columns(2)
-    approved = left.button("批准", type="primary", use_container_width=True)
+    approved = left.button("批准", type="primary", width="stretch", disabled=exhausted)
     rejected = right.button("拒绝", use_container_width=True)
     if not (approved or rejected):
         return
@@ -1297,7 +1383,12 @@ def render_owner_console(*, show_case_picker=True, linked_supplier_id=None):
     case = get_case()
     if not show_case_picker and case:
         st.button("在客户页面继续此案件", on_click=resume_for_customer, args=(case.id,), key="resume_customer_case")
-    history=list_saved_cases() if show_case_picker else []
+    history = []
+    if show_case_picker:
+        hidden = hidden_archive_ids()
+        history = [record for record in list_saved_cases() if f"case:{record['id']}" not in hidden]
+        if case and f"case:{case.id}" in hidden:
+            case = None
     ids=[r["id"] for r in history]
     labels={r["id"]:f"{r['title'][:35]} · {'方案已确认' if r['status']=='completed' else OWNER_STATUS_LABELS.get(r['status'],r['status'])} · {r['id']}" for r in history}
     if show_case_picker and case and case.id not in ids:
@@ -1333,13 +1424,6 @@ def render_owner_console(*, show_case_picker=True, linked_supplier_id=None):
             st.error(case.error_message)
         with st.expander("任务与审计记录"):
             render_owner_audit(case)
-        if st.button("删除当前案件", type="secondary"):
-            try:
-                delete_case_from_disk(case)
-                st.session_state.pop("case", None)
-                st.rerun()
-            except CaseConflictError as exc:
-                st.error(str(exc))
         return
     if case and case.service_mode == "activity_review":
         render_activity_case(None, case, process_case, save_case, owner=True, sync=sync_current_case,
@@ -1352,13 +1436,6 @@ def render_owner_console(*, show_case_picker=True, linked_supplier_id=None):
             render_owner_audit(case)
         st.download_button("保存本案记录", case.model_dump_json(indent=2),
             file_name=f"{case.id}.json", mime="application/json")
-        if st.button("删除当前案件", type="secondary"):
-            try:
-                delete_case_from_disk(case)
-                st.session_state.pop("case", None)
-                st.rerun()
-            except CaseConflictError as exc:
-                st.error(str(exc))
         return
     overview, council, feedback, audit = st.tabs(
         ["案件与审批", "协作与分歧", "反馈与改进", "审计与规则"]
@@ -1371,9 +1448,9 @@ def render_owner_console(*, show_case_picker=True, linked_supplier_id=None):
                 for message in change_requests:
                     st.write(message)
         render_owner_approval(case)
-        supplier_id = case.supplier_order_id or linked_supplier_id
+        supplier_id = case.supplier_order_id or linked_supplier_id or find_case_booking(case)
         if supplier_id:
-            render_owner_supplier_order(supplier_id)
+            render_owner_supplier_order(supplier_id, case=case)
         else:
             render_procurement(case, save_case, owner=True, sync=sync_current_case)
         if activity_order.TRACKING_ENABLED:
@@ -1430,9 +1507,9 @@ def render_dashboard_policy():
     render_company_policy(CompanyPolicy(), organization)
 
 
-def render_owner_supplier_order(order_id):
+def render_owner_supplier_order(order_id, *, case=None):
     try:
-        render_supplier_workspace(owner=True, order_id=order_id)
+        render_supplier_workspace(owner=True, case=case, order_id=order_id)
     except (OSError, ValueError, sqlite3.Error):
         st.error("预订记录暂时无法读取，请返回驾驶舱查看最新记录。")
 
@@ -1483,6 +1560,9 @@ def switch_customer_area(area):
 def render_customer_entry(area):
     case = get_case()
     booking = area == SUPPLIER_AREA
+    if case and booking:
+        switch_customer_area(TRAVEL_AREA)
+        booking = False
     request_type = "团建策划"
     if case is None:
         active_booking = booking and (st.session_state.get("customer_supplier_order_id")
@@ -1498,9 +1578,7 @@ def render_customer_entry(area):
                 if selected_area != area:
                     switch_customer_area(selected_area)
     if booking:
-        if case is not None:
-            st.button("返回团建需求", on_click=switch_customer_area, args=(TRAVEL_AREA,))
-        render_supplier_workspace(case=case, attach=save_case)
+        render_supplier_workspace()
         return
     try:
         workflow = get_workflow()
@@ -1543,7 +1621,7 @@ elif business_area == OWNER_DASHBOARD_AREA:
 elif business_area == HISTORY_AREA:
     render_history_workspace(owner=True)
 elif business_area == SUPPLIER_AREA:
-    render_supplier_workspace(owner=True, case=get_case(), attach=save_case)
+    render_supplier_workspace(owner=True)
 else:
     render_owner_console()
 

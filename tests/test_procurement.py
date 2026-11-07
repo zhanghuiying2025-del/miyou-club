@@ -173,7 +173,9 @@ class ProcurementTests(unittest.TestCase):
             client.run()
             owner = AppTest.from_file(str(application), default_timeout=30).run()
             owner.sidebar.radio[0].set_value("公司老板").run()
-            owner.button(key=f"owner_dashboard_pending:case:{case.id}").click().run()
+            owner.button(key="owner_dashboard_go_orders").click().run()
+            owner.selectbox(key="owner_dashboard_order_selection").set_value(f"case:{case.id}").run()
+            owner.button(key=f"owner_dashboard_open:case:{case.id}").click().run()
             next(x for x in owner.selectbox if x.label == "老板选择资源组合").set_value("near_budget")
             next(x for x in owner.button if x.label == "批准所选商业方案").click().run()
             self.assertEqual(len(owner.exception), 0)
@@ -186,7 +188,7 @@ class ProcurementTests(unittest.TestCase):
             self.assertEqual(load_case_from_disk().storage_revision, 3)
             owner.button(key="owner_dashboard_return").click().run()
             self.assertFalse(owner.exception)
-            self.assertTrue(any(b.key==f"owner_dashboard_pending:case:{case.id}" for b in owner.button))
+            self.assertEqual(owner.button(key=f"owner_dashboard_open:case:{case.id}").label,"进入现有审批")
 
     def test_automatic_ready_requests_full_redraw(self):
         from src.procurement_ui import render_procurement

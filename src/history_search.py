@@ -200,10 +200,11 @@ def redis_search(rows, query, vectors, query_vector, identity):
         client.close()
 
 
-def search(query, *, document_id=None, city="", kind="", limit=8, case=None):
+def search(query, *, document_id=None, city="", kind="", limit=8, case=None, exclude_document_ids=()):
     docs, rows = sync_index()
     query = str(query).strip()[:2000]
-    eligible = [r for r in rows if r["active"] and (not document_id or r["document_id"] == document_id)
+    eligible = [r for r in rows if r["active"] and r["document_id"] not in exclude_document_ids
+        and (not document_id or r["document_id"] == document_id)
         and (not city or r["city"] == city) and (not kind or r["kind"] == kind)]
     if case is not None:
         eligible = [r for r in eligible if r["source_id"] != case.id and r["service"] == case.service_mode

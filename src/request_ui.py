@@ -8,7 +8,8 @@ from src.style_planning import STYLE_OPTIONS
 
 TEAM_PROFILES = ["全部或主要是年轻人", "青年、中年等年龄分布较广", "全部或主要是中年人",
                  "包含较多老年人", "小学生或儿童团体", "亲子或家庭混合团体", "暂不确定"]
-DURATIONS = ["半天", "1天", "2天1晚", "3天2晚", "其他或未确定"]
+DURATIONS = ["半天", "1天", "2天1晚", "3天2晚", "暂未确定"]
+DIETARY_TAG_OPTIONS = ("清淡", "少辣", "不辣", "素食", "清真", "食物过敏")
 STYLE_DETAILS = {
     "城市游玩": ("城市活动偏好", ["同一区域慢逛", "加入城市探索任务", "多留自由活动时间"]),
     "户外活动": ("运动强度", ["轻松为主", "适度挑战", "为不同体力成员准备可选路线"]),
@@ -16,19 +17,34 @@ STYLE_DETAILS = {
 }
 
 
+def single_choice(label, options, *, value=None, key, other_max_chars=300):
+    custom = value if value and value not in options else ""
+    default = "其他" if custom else value or None
+    choice = st.pills(label, [*options, "其他"], default=default, key=f"{key}:choice")
+    if choice == "其他":
+        return st.text_input(f"{label}（其他）", value=custom, max_chars=other_max_chars,
+                             key=f"{key}:other").strip() or None
+    return choice
+
+
+def multiple_choices(label, options, *, values=(), key, other_max_chars=1000):
+    tags = list(dict.fromkeys(value for value in values if value in options))
+    custom = [value for value in values if value not in options and value.strip()]
+    choices = st.multiselect(label, [*options, "其他"], default=[*tags, *(["其他"] if custom else [])],
+                             key=f"{key}:choice")
+    if "其他" not in choices:
+        return choices
+    note = st.text_area(f"{label}（其他）", value="\n".join(custom), max_chars=other_max_chars, key=f"{key}:other")
+    selected = [value for value in choices if value != "其他"]
+    selected.extend(line.strip() for line in note.splitlines() if line.strip())
+    return list(dict.fromkeys(selected))
+
+
 def request_style(draft, key):
     options = [style for style in STYLE_OPTIONS if style != "还没想好"]
-    saved = draft.get("preferred_style") or ""
-    modes = ["自己填写", "还没想好，选一个"]
-    mode = st.radio("怎么确定活动风格？", modes, horizontal=True, key=f"{key}:mode",
-                    index=modes.index(draft.get("style_mode", modes[0])))
-    if mode == modes[1]:
-        style = st.selectbox("选择一个活动风格", options, index=options.index(saved) if saved in options else None,
-                             placeholder="请选择一个方向", key=f"{key}:choice")
-    else:
-        style = st.text_input("活动风格", value=saved if saved != "还没想好" else "", max_chars=300,
-                              placeholder="例如，慢节奏、室内为主，多小组交流，避免竞技", key=f"{key}:text").strip()
-    return style or "", mode
+    saved = draft.get("preferred_style")
+    style = single_choice("活动风格", options, value=saved if saved != "还没想好" else None, key=key)
+    return style or "", "还没想好，选一个" if style in options else "自己填写"
 
 
 def show_request_summary(req):
@@ -51,37 +67,41 @@ def request_wizard(goals, constraints, dietary):
     st.caption(f"第 {step} 步 / 共 3 步")
     if step == 1:
         st.subheader("基本信息")
-        with st.form("trip_basics"):
-            city = st.text_input("活动城市 *", value=draft.get("city", ""), placeholder="例如，南京")
-            col1, col2 = st.columns(2)
-            day = col1.date_input("活动日期 *", value=draft.get("event_date"), format="YYYY-MM-DD")
-            people = col2.number_input("参与人数 *", 1, 1000, draft.get("participant_count", 30))
-            duration = col1.selectbox("活动时长", DURATIONS, index=DURATIONS.index(draft.get("duration", "1天")))
-            budget = col2.number_input("总预算（元，选填）", min_value=0, max_value=10_000_000,
-                                       value=draft.get("budget_yuan"), step=1000)
-            if st.form_submit_button("下一步", type="primary"):
-                if not city.strip() or day is None:
-                    st.error("请填写活动城市并选择活动日期。")
-                else:
-                    draft.update(city=city.strip(), event_date=day, participant_count=int(people),
-                                 duration=duration, budget_yuan=budget, step=2)
-                    st.rerun()
+        city = st.text_input("活动城市 *", value=draft.get("city", ""), placeholder="例如，南京")
+        col1, col2 = st.columns(2)
+        day = col1.date_input("活动日期 *", value=draft.get("event_date"), format="YYYY-MM-DD")
+        people = col2.number_input("参与人数 *", 1, 1000, draft.get("participant_count", 30))
+        budget = st.number_input("总预算（元，选填）", min_value=0, max_value=10_000_000,
+                                 value=draft.get("budget_yuan"), step=1000)
+        saved_duration = draft.get("duration", "1天")
+        duration = single_choice("活动时长", DURATIONS, value="暂未确定" if saved_duration == "其他或未确定" else saved_duration,
+                                 key="trip_duration")
+        if st.button("下一步", type="primary"):
+            if not city.strip() or day is None:
+                st.error("请填写活动城市并选择活动日期。")
+            elif not duration:
+                st.error("请选择活动时长，或填写其他时长。")
+            else:
+                draft.update(city=city.strip(), event_date=day, participant_count=int(people),
+                             duration=duration, budget_yuan=budget, step=2)
+                st.rerun()
     elif step == 2:
         st.subheader("你想要怎样的团建？")
         style, style_mode = request_style(draft, "trip_style")
-        profile = st.selectbox("团队情况", TEAM_PROFILES,
-                               index=TEAM_PROFILES.index(draft.get("team_profile", TEAM_PROFILES[1])))
+        profile = single_choice("团队情况", TEAM_PROFILES, value=draft.get("team_profile", TEAM_PROFILES[1]),
+                                key="trip_team")
         detail = None
         if style in STYLE_DETAILS:
             label, options = STYLE_DETAILS[style]
             saved = draft.get("style_details", {}).get(style)
-            detail = st.selectbox(label, [None, *options], index=options.index(saved) + 1 if saved in options else 0,
-                                  format_func=lambda value: value or "暂未确定", key=f"trip_detail_{style}")
+            detail = single_choice(label, options, value=saved, key=f"trip_detail_{style}")
         default_checks = ["不安排高风险运动", "不强迫成员参加竞技项目", "必须准备雨天室内备用方案"]
         with st.expander("目标、安全要求和参考附件（选填）"):
-            desired = st.multiselect("团建目标", goals, default=draft.get("desired_outcomes", ["增强团队协作", "创造共同回忆"]))
-            required = st.multiselect("必须遵守的要求", constraints, default=draft.get("constraints", default_checks))
-            meals = st.multiselect("餐饮需求", dietary, default=draft.get("dietary", []))
+            desired = multiple_choices("团建目标", goals, values=draft.get("desired_outcomes", ["增强团队协作", "创造共同回忆"]),
+                                       key="trip_goals")
+            required = multiple_choices("必须遵守的要求", constraints, values=draft.get("constraints", default_checks),
+                                        key="trip_constraints")
+            meals = multiple_choices("餐饮需求", dietary, values=draft.get("dietary", []), key="trip_dietary")
             notes = st.text_area("其他说明", value=draft.get("notes", ""), max_chars=2000)
             files = st.file_uploader("参考资料（最多3份）", type=["jpg", "jpeg", "png", "gif", "webp", "pdf", "docx"],
                                      accept_multiple_files=True)
@@ -95,7 +115,10 @@ def request_wizard(goals, constraints, dietary):
         forward = right.button("下一步", type="primary")
         if back or forward:
             if forward and style in {"", "还没想好"}:
-                st.error("请描述你想要的风格，或选择「还没想好，选一个」。")
+                st.error("请选择活动风格，或填写其他风格。")
+                return None
+            if forward and not profile:
+                st.error("请选择团队情况，或填写其他团队情况。")
                 return None
             attachments = [] if clear else saved_files
             if files:
@@ -115,10 +138,11 @@ def request_wizard(goals, constraints, dietary):
     else:
         st.subheader("确认需求")
         details = [x for x in (draft["style_details"].get(draft["preferred_style"]), draft["notes"]) if x]
+        meal_constraints = [item if item in dietary else f"餐饮要求：{item}" for item in draft["dietary"]]
         req = RequirementSpec(city=draft["city"], event_date=draft["event_date"].isoformat(),
             participant_count=draft["participant_count"], duration=draft["duration"], budget_yuan=draft["budget_yuan"] or None,
             team_profile=draft["team_profile"], preferred_style=draft["preferred_style"], desired_outcomes=draft["desired_outcomes"],
-            hard_constraints=[*draft["constraints"], *draft["dietary"]], preferences=details)
+            hard_constraints=[*draft["constraints"], *meal_constraints], preferences=details)
         show_request_summary(req)
         attachments = draft.get("attachments", [])
         if attachments:

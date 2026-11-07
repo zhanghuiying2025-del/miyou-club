@@ -103,6 +103,21 @@ def saved_case_snapshots():
     return list(_read_book()["cases"].values())
 
 
+def hidden_archive_ids() -> set[str]:
+    return set(_read_book().get("hidden_archive_ids", []))
+
+
+def set_archive_hidden(document_id: str, hidden: bool) -> None:
+    """Save a list preference separately from the source records."""
+    with _write_lock():
+        book = _read_book()
+        previous = set(book.get("hidden_archive_ids", []))
+        updated = previous | {document_id} if hidden else previous - {document_id}
+        if updated != previous:
+            book["hidden_archive_ids"] = sorted(updated)
+            _write_book(book)
+
+
 def load_visit(visit_id):
     return dict(_read_book()["visits"].get(visit_id,{}))
 

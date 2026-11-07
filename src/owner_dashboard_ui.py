@@ -16,7 +16,7 @@ TASK_STATES = {
 EXCEPTION_STATES = {"failed", "interrupted"}
 MONEY_COLUMNS = {
     "预计成本", "预计利润", "已确认合同收入", "已记录直接成本", "已实现订单利润",
-    "已确认净服务费收入", "已结清供方支出", "模拟推广支出",
+    "已确认净服务费收入", "已结清供方支出", "模拟推广支出", "客户已付金额",
 }
 
 DASHBOARD_STYLE = """
@@ -93,62 +93,45 @@ def _switch_page(page):
     st.session_state[PAGE_KEY] = page
 
 
-def _overview(snapshot, open_order):
+def _overview(snapshot):
     st.subheader(PAGES[0])
-    st.caption("当前累计 · 数据按业务与结算口径分列")
-    travel, supplier = snapshot["travel"], snapshot["supplier"]
-    metrics = (
-        ("已登记线索", f"{supplier['leads']} 条", "酒店餐饮 · 模拟登记"),
-        ("已付订单", f"{travel['paid_orders']} 笔", f"团建 · 含预付，已结算 {travel['settled_orders']} 笔"),
-        ("已确认合同收入", _money(travel["revenue_cents"]), "团建 · 已结算订单"),
-        ("已结算单直接成本", _money(travel["direct_cost_cents"]), "团建 · 供方、AI 运营及活动支出"),
-    )
-    for column, (label, value, scope) in zip(st.columns(4), metrics):
-        with column.container(border=True):
-            st.metric(label, value)
-            st.caption(scope)
-    st.caption(
-        f"酒店餐饮模拟 · 去重付费客户 {supplier['paying_customers']} 位 · "
-        f"已付 {supplier['paid_orders']} 笔 · 已结算 {supplier['settled_orders']} 笔 · "
-        f"已确认净服务费 {_money(supplier['service_income_cents'])}"
-    )
-
-    pending = [order for order in snapshot["orders"] if order["needs_owner"]]
-    tasks = [
-        task for task in snapshot["tasks"]
-        if task["status"] == "running" or task["status"] in EXCEPTION_STATES
-    ]
-    pending_col, task_col = st.columns([1.2, 1])
+    st.caption("查看经营摘要，使用顶部导航处理具体事务。")
+    pending = sum(order["needs_owner"] for order in snapshot["orders"])
+    exceptions = sum(task["status"] in EXCEPTION_STATES for task in snapshot["tasks"])
+    main_orders = snapshot["main_orders"]
+    pending_col, settled_col, task_col = st.columns(3)
     with pending_col.container(border=True):
-        st.subheader(f"需要你处理 · {len(pending)} 项")
-        if pending:
-            for order in pending[:3]:
-                detail = order["blocker"] or order["stage"]
-                _item(order["title"], "待老板", detail, urgent=True)
-                if order.get("after_approval"):
-                    st.caption(f"批准后 · {order['after_approval']}")
-                st.button(
-                    "查看审批", key=f"owner_dashboard_pending:{order['key']}",
-                    on_click=open_order, args=(order,),
-                )
-        else:
-            st.caption("当前没有需要老板处理的事项。")
-        st.button(
-            "查看订单与风险", key="owner_dashboard_go_orders",
-            on_click=_switch_page, args=(PAGES[1],),
-        )
+        st.metric("待老板处理", f"{pending} 项")
+        st.button("查看订单与风险", key="owner_dashboard_go_orders",
+                  on_click=_switch_page, args=(PAGES[1],))
+    with settled_col.container(border=True):
+        st.metric("已结清团建主单", f"{main_orders['settled']} 笔")
+        st.caption(f"累计已付 {main_orders['paid']} 笔 · 按团建案件去重")
+        st.button("查看经营复盘", key="owner_dashboard_go_review",
+                  on_click=_switch_page, args=(PAGES[2],))
     with task_col.container(border=True):
-        st.subheader("Agent 动态")
-        if tasks:
-            for task in tasks[:4]:
-                title = f"{task['actor']} · {task['title']}"
-                detail = " · ".join(filter(None, (task["order_title"], task["detail"])))
-                _item(title, TASK_STATES[task["status"]], detail, urgent=task["status"] in EXCEPTION_STATES)
-        else:
-            st.caption("当前没有执行中、失败或中断的任务记录。")
-        st.button(
-            "查看任务", key="owner_dashboard_go_tasks",
-            on_click=_switch_page, args=(PAGES[3],),
+        st.metric("失败与中断任务", f"{exceptions} 项")
+        st.button("查看任务", key="owner_dashboard_go_tasks",
+                  on_click=_switch_page, args=(PAGES[3],))
+
+
+def _review_cash(snapshot):
+    supplier = snapshot["supplier"]
+    cash = snapshot["supplier_cash"]
+    with st.container(border=True):
+        st.markdown("**酒店餐饮与运营 · 模拟资金**")
+        st.caption(
+            f"去重付费客户 {supplier['paying_customers']} 位 · "
+            f"酒店餐饮已付 {supplier['paid_orders']} 笔 · 已结算 {supplier['settled_orders']} 笔 · "
+            f"已确认净服务费 {_money(supplier['service_income_cents'])}"
+        )
+        incoming, outgoing, balance = st.columns(3)
+        incoming.metric("累计模拟收款", _money(cash["incoming_cents"]))
+        outgoing.metric("累计模拟支出", _money(cash["outgoing_cents"]))
+        balance.metric("模拟现金余额", _money(cash["cash_cents"]))
+        st.caption(
+            f"收款含客户预付款和尾款，支出含供方款和模拟推广费。"
+            f"余额包含期初资金 {_money(cash['opening_cents'])}，服务费在结算后确认。"
         )
 
 
@@ -195,13 +178,14 @@ def _orders(orders, open_order):
         _item("当前阶段", order["stage"], order["blocker"], urgent=order["needs_owner"])
         st.caption(f"当前接手人 · {order['next_actor']}")
         if order.get("after_approval"):
-            st.caption(f"批准后 · {order['after_approval']}")
+            st.caption(f"处理后 · {order['after_approval']}")
         if order.get("alternatives"):
             st.markdown("**资源方案对比**")
             _table(order["alternatives"])
             st.caption("商业方案获批后，涉及已约定条件变化时由客户确认。供方支出另行授权。")
         st.button(
-            "进入现有审批" if order["needs_owner"] else "打开订单详情",
+            ("提交预订" if order["stage"] == "待提交模拟预订" else
+             "进入现有审批" if order["needs_owner"] else "打开订单详情"),
             key=f"owner_dashboard_open:{order['key']}", type="primary",
             on_click=open_order, args=(order,),
         )
@@ -216,6 +200,8 @@ def _orders(orders, open_order):
 def _review(snapshot, open_order):
     st.subheader(PAGES[2])
     st.caption("按业务核对已结算结果，回到原订单查看反馈与决策记录。")
+    st.caption("原团建资源合同按合同收入和直接成本展示。酒店餐饮按客户已付、供方支出和净服务费展示。")
+    _review_cash(snapshot)
     settled_col, growth_col = st.columns([1.2, 1])
     with settled_col.container(border=True):
         st.subheader("已结算订单")
@@ -260,21 +246,20 @@ def _review(snapshot, open_order):
 
 def _team(snapshot, open_order, render_policy):
     st.subheader(PAGES[3])
-    st.caption("项目经理 · 多角色策划 · 履约执行")
-    tasks_col, policy_col = st.columns([1.45, 1])
-    with tasks_col.container(border=True):
+    st.caption("项目经理 · 策划 · 履约执行")
+    with st.container(border=True):
         st.subheader("任务与交接")
         st.caption("任务结果按模型输出、程序计算、规则降级和缓存复用区分。")
         filters = {
+            "失败与中断": ("failed", "interrupted"),
             "全部": tuple(TASK_STATES),
             "执行中": ("running",),
-            "失败与中断": ("failed", "interrupted"),
             "已完成": ("completed",),
         }
         task_filter = st.selectbox("任务状态", list(filters), key="owner_dashboard_task_filter")
         tasks = [task for task in snapshot["tasks"] if task["status"] in filters[task_filter]]
         if tasks:
-            _table([
+            details = [
                 {
                     "订单": task["order_title"],
                     "任务": task["title"],
@@ -288,7 +273,11 @@ def _team(snapshot, open_order, render_policy):
                     "结果或失败原因": task["detail"],
                 }
                 for task in tasks
-            ])
+            ]
+            columns = ("订单", "任务", "执行方", "状态", "结果或失败原因")
+            _table([{column: row[column] for column in columns} for row in details])
+            with st.expander("查看完整任务交接"):
+                _table(details)
             task_orders = {task["order_key"] for task in tasks}
             orders = {
                 order["key"]: order for order in snapshot["orders"] if order["key"] in task_orders
@@ -306,7 +295,7 @@ def _team(snapshot, open_order, render_policy):
                 st.caption("可在订单详情按原步骤处理失败或中断的任务。")
         else:
             st.info("这个筛选范围内暂无任务记录。")
-    with policy_col.container(border=True):
+    with st.expander("查看审批规则与反馈约束"):
         render_policy()
 
 
@@ -330,4 +319,4 @@ def render_owner_dashboard(snapshot, *, open_order, render_policy):
         elif page == PAGES[3]:
             _team(snapshot, open_order, render_policy)
         else:
-            _overview(snapshot, open_order)
+            _overview(snapshot)

@@ -275,3 +275,43 @@ class HistoryArchiveTests(unittest.TestCase):
         self.assertFalse(any(x.label == "查看完整档案" for x in app.selectbox))
         self.assertEqual([r.label for r in app.sidebar.radio], ["当前身份"])
         self.assertTrue(any(x.label == "活动城市 *" for x in app.text_input))
+
+    def test_owner_groups_hides_and_restores_cases_without_deleting_records(self):
+        from streamlit.testing.v1 import AppTest
+        from src.storage import hidden_archive_ids, load_visit, save_visit
+        failed = sample("失败的团建", status=CaseStatus.FAILED)
+        unfinished = sample("确认方案待结算")
+        success = sample("已结算的团建")
+        for case in (failed, unfinished, success):
+            save_case_to_disk(case)
+        with transaction() as tx:
+            tx.save("supplier_order", "s1", {"id":"s1", "case_id":success.id, "need":{"city":"南京"},
+                "status":"completed", "delivered":True, "customer_id":"test"})
+            tx.event("cash1", "cash", "s1", {"direction":"in", "cents":1000})
+        original = archive.documents()
+        visit = "archive-owner"
+        save_visit(visit, {"identity":"公司老板", "work_area":"历史订单管理", "owner_case_id":success.id})
+        app_file = str(Path(__file__).resolve().parents[1]/"app.py")
+        with patch("src.visits._browser_visit", return_value=SimpleNamespace(visit={"id":visit})), \
+             patch("src.agents.build_agent_team", side_effect=AssertionError("must not build agents")):
+            app = AppTest.from_file(app_file, default_timeout=30).run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.selectbox(key="archive_case_selection").value, f"case:{success.id}")
+            app.radio(key="archive_case_group").set_value("问题案例").run()
+            self.assertEqual(set(app.dataframe[0].value["结果"]), {"失败", "未完成"})
+            app.radio(key="archive_case_group").set_value("成功案例").run()
+            app.button(key=f"archive_remove:case:{success.id}").click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(hidden_archive_ids(), {f"case:{success.id}"})
+            self.assertEqual(set(app.dataframe[0].value["编号"]), {failed.id, unfinished.id})
+            self.assertEqual(load_visit(visit)["owner_case_id"], success.id)
+            self.assertEqual(archive.documents(), original)
+            with transaction() as tx:
+                self.assertEqual(tx.events("cash")[0]["cents"], 1000)
+            app = AppTest.from_file(app_file, default_timeout=30).run()
+            app.radio(key="archive_case_group").set_value("已移除").run()
+            self.assertEqual(app.selectbox(key="archive_case_selection").value, f"case:{success.id}")
+            app.button(key="archive_restore").click().run()
+            self.assertFalse(app.exception)
+            self.assertFalse(hidden_archive_ids())
+            self.assertEqual(archive.documents(), original)

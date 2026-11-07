@@ -164,6 +164,13 @@ class CacheStageTests(unittest.TestCase):
         value = decode_response(ManagerReview, {"findings": [], "completion_conditions": ["核查完成"]})
         self.assertTrue(value.operations.passed and value.risk.passed)
 
+    def test_extra_draft_basis_does_not_discard_plan(self):
+        plan = plan_payload()
+        plan["basis"] = [f"依据 {i}" for i in range(5)]
+        value = decode_response(ManagedPlan, {"plan": plan, "findings": []})
+        self.assertEqual(value.plan.rationale, plan["basis"][:4])
+        self.assertEqual(value.plan.schedule, plan["schedule"])
+
     def test_new_draft_requires_evidence_and_completion_conditions(self):
         payload = {"plan": plan_payload(), "findings": [{"domain": "operations", "severity": "medium",
             "description": "时间冲突", "release_condition": "调整时间"}]}
