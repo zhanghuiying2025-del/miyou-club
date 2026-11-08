@@ -97,7 +97,7 @@ def _overview(snapshot):
     st.subheader(PAGES[0])
     st.caption("查看经营摘要，使用顶部导航处理具体事务。")
     pending = sum(order["needs_owner"] for order in snapshot["orders"])
-    exceptions = sum(task["status"] in EXCEPTION_STATES for task in snapshot["tasks"])
+    exceptions = sum(task["status"] in EXCEPTION_STATES and not task.get("recovered") for task in snapshot["tasks"])
     main_orders = snapshot["main_orders"]
     pending_col, settled_col, task_col = st.columns(3)
     with pending_col.container(border=True):
@@ -110,7 +110,7 @@ def _overview(snapshot):
         st.button("查看经营复盘", key="owner_dashboard_go_review",
                   on_click=_switch_page, args=(PAGES[2],))
     with task_col.container(border=True):
-        st.metric("失败与中断任务", f"{exceptions} 项")
+        st.metric("待处理异常", f"{exceptions} 项")
         st.button("查看任务", key="owner_dashboard_go_tasks",
                   on_click=_switch_page, args=(PAGES[3],))
 
@@ -265,7 +265,7 @@ def _team(snapshot, open_order, render_policy):
                     "任务": task["title"],
                     "发起方": task.get("sender", ""),
                     "执行方": task["actor"],
-                    "状态": TASK_STATES[task["status"]],
+                    "状态": "已恢复（历史异常）" if task.get("recovered") else TASK_STATES[task["status"]],
                     "耗时（秒）": task["elapsed_seconds"],
                     "来源": task["source"],
                     "输入依据": task.get("input_summary", ""),

@@ -20,6 +20,7 @@ from src import web_flow as flow
 from src.company_store import SimulationConflict
 from src.models import CaseStatus, TravelCase
 from src.multimodal import MAX_DOCX_BYTES, validate_attachment
+from src.order_labels import case_number
 from src.owner_dashboard import load_owner_dashboard
 from src.policy import CompanyPolicy
 from src.workflow import WorkflowError
@@ -126,6 +127,7 @@ def create_app(frontend=FRONTEND):
                 status = flow.customer_status(TravelCase.model_validate(case))
             result.append({
                 "id": case["id"], "title": (case.get("requirements") or {}).get("event_name", "团建活动"),
+                "display_number": case_number(case),
                 "status": status, "updated_at": row["updated_at"],
                 "booking_status": booking.status if booking else None,
                 "service_mode": case.get("service_mode", "travel_planning"),
@@ -220,8 +222,8 @@ def create_app(frontend=FRONTEND):
     @app.post("/api/owner/session")
     def owner_login(payload: OwnerLogin, response: Response):
         password = os.environ.get("MIYOU_OWNER_PASSWORD")
-        if not password:
-            raise HTTPException(503, "启动服务前请设置 MIYOU_OWNER_PASSWORD。")
+        if not password or not password.strip():
+            raise HTTPException(503, "请在 PowerShell 设置老板口令 MIYOU_OWNER_PASSWORD 后重启服务。")
         if not compare_digest(payload.password.encode(), password.encode()):
             raise HTTPException(401, "老板工作台口令不正确。")
         response.set_cookie(OWNER_COOKIE, owner_session, httponly=True, samesite="strict")

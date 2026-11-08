@@ -39,12 +39,15 @@ class CacheStageTests(unittest.TestCase):
     def test_structured_reply_uses_unique_valid_object_and_rejects_conflicts(self):
         payload = json.dumps(plan_payload(), ensure_ascii=False)
         agent = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(
-            text=f"方案如下：\n```json\n{payload}\n```\n{{\"note\": \"已核对\"}}")))
+            text=f"[说明] 方案如下：\n```json\n{payload}\n```\n{{\"note\": \"已核对\"}}\n[完毕]")))
         result = asyncio.run(run_structured(agent, "生成方案", CouncilDecision))
         self.assertEqual(result.theme, "轻量活动")
         other = json.dumps(dict(plan_payload(), theme="另一份方案"), ensure_ascii=False)
         agent.run.return_value.text = f"{payload}\n{other}"
         with self.assertRaisesRegex(AgentOutputError, "多个不同的有效结果"):
+            asyncio.run(run_structured(agent, "生成方案", CouncilDecision))
+        agent.run.return_value.text = '{"broken": ' + payload
+        with self.assertRaisesRegex(AgentOutputError, "模型返回格式不正确"):
             asyncio.run(run_structured(agent, "生成方案", CouncilDecision))
 
     def setUp(self):

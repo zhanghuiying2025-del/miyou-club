@@ -50,9 +50,12 @@ def register_owner_features(app, require_owner):
     @app.get("/api/owner/archive", dependencies=protected)
     def archive():
         docs = history_archive.documents()
-        hidden = history_archive.hidden_documents(docs, storage.hidden_archive_ids())
+        hidden_ids = storage.hidden_archive_ids()
+        hidden = history_archive.hidden_documents(docs, hidden_ids)
         return [{**{k: v for k, v in doc.items() if k not in {"snapshot", "related_orders"}},
-                 "outcome": history_archive.case_outcome(doc), "hidden": doc["id"] in hidden}
+                 "outcome": history_archive.case_outcome(doc), "hidden": doc["id"] in hidden,
+                 "hidden_by_case": doc["kind"] == "supplier" and
+                 f"case:{doc['snapshot'].get('case_id')}" in hidden_ids}
                 for doc in docs]
 
     @app.get("/api/owner/archive/search", dependencies=protected)
@@ -84,8 +87,12 @@ def register_owner_features(app, require_owner):
 
     @app.post("/api/owner/archive/{document_id}", dependencies=protected)
     def switch_archive(document_id: str, payload: Switch):
-        if not history_archive.get_document(document_id):
+        doc = history_archive.get_document(document_id)
+        if doc is None:
             raise HTTPException(404, "找不到这份档案。")
+        if payload.active and doc["kind"] == "supplier" and (
+                f"case:{doc['snapshot'].get('case_id')}" in storage.hidden_archive_ids()):
+            raise HTTPException(409, "请先恢复关联的团建订单。")
         storage.set_archive_hidden(document_id, not payload.active)
         return {"ok": True}
 

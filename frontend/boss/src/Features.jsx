@@ -7,19 +7,26 @@ const stageNames = {
   in_progress: '处理中', plan_confirmed: '方案已确认', delivered: '已交付，待结算', completed: '已履约并结算',
 };
 
-function problemText(task) {
-  const detail = task.detail || '';
-  const step = ({
+export function taskStep(task) {
+  return ({
     ProposalBrief: '准备活动方向', FeasibilityReview: '检查执行条件', ManagedPlan: '整理草案',
     CouncilDecision: '整理活动方案', IntakeResult: '整理客户信息',
     DocumentIntakeResult: '读取活动资料', ActivityAudit: '审核已有方案', ActivityExecutionPlan: '整理执行清单',
-  })[task.expected_result || task.title.split('·').at(-1)?.trim()] || '处理订单';
+  })[task.expected_result || task.title.split('·').at(-1)?.trim()];
+}
+
+export function problemText(task) {
+  const detail = task.detail || '';
+  const step = taskStep(task) || '处理订单';
   if (task.status === 'interrupted') {
     return { title: step + '时中断了', reason: '这一步上次停在半途。打开订单可以查看已保存的进度。' };
   }
   const limit = detail.match(/超过\s*(\d+)\s*秒/);
   if (limit) {
     return { title: step + '等得太久', reason: '等了 ' + limit[1] + ' 秒，这一步仍没拿到结果。' };
+  }
+  if (/等待超时|处理取消或超时|处理超时/.test(detail)) {
+    return { title: step + '等得太久', reason: '这一步在完成前已停止。打开订单可以从保存的步骤重试。' };
   }
   if (/Extra data|模型返回格式|没有可用的 JSON|多个不同的有效结果/.test(detail)) {
     return { title: step + '时没拿到可用结果', reason: '系统收到了回复，但没能把它整理成这一步所需的结果。' };
@@ -30,14 +37,11 @@ function problemText(task) {
   return { title: step + '暂时没完成', reason: '现有记录暂时无法说明具体原因，可打开订单查看进度。' };
 }
 
-export function Exceptions({ tasks, orders, allTasks }) {
+export function Exceptions({ tasks, orders }) {
   const [history, setHistory] = useState(false);
   const entries = tasks.map(task => {
     const order = orders.find(item => item.key === task.order_key);
-    const resumed = (task.created_at && allTasks.some(other => other.order_key === task.order_key &&
-      other.title === task.title && other.status === 'completed' && other.created_at > task.created_at)) ||
-      order?.case_status === 'completed' && /^(?:intake|creative_council|cross_review|deliberation|reviewing|supplementing)\s*·/.test(task.title);
-    return { task, order, resumed };
+    return { task, order, resumed: Boolean(task.recovered) };
   });
   const visible = entries.filter(entry => Boolean(entry.resumed) === history);
   return <>
@@ -70,11 +74,12 @@ export function Archive() {
   const [search, setSearch] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState('');
   const path = '/owner/archive/' + encodeURIComponent(selected);
   const detail = useResource(selected ? path : null);
   const results = useResource(search ? '/owner/archive/search?' + search : null);
   const shown = (data || []).filter(item => item.hidden === hidden && (!stage || item.stage === stage) &&
-    (!kind || item.kind === kind) && (item.title + item.id + item.city).toLowerCase().includes(filter.trim().toLowerCase()));
+    (!kind || item.kind === kind) && [item.title, item.id, item.city, item.display_number].join(' ').toLowerCase().includes(filter.trim().toLowerCase()));
 
   async function save(url, body, message) {
     setBusy(true);
@@ -85,12 +90,38 @@ export function Archive() {
       detail.refresh();
       results.refresh();
       setNotice(message);
+      return true;
     } catch (failure) {
       setNotice(failure.message);
+      return false;
     } finally { setBusy(false); }
   }
+
+  function showDeleted(value) {
+    setHidden(value);
+    setSelected('');
+    setConfirmRemove('');
+    setNotice('');
+  }
+
+  async function changeArchive(item) {
+    const restore = item.hidden;
+    const saved = await save('/owner/archive/' + encodeURIComponent(item.id), { active: restore },
+      restore ? '订单已恢复到历史订单。' : '订单已移到「已删除」，可随时恢复。');
+    if (saved) {
+      setSelected(current => current === item.id ? '' : current);
+      setConfirmRemove('');
+    }
+  }
+
   return <>
     {(error || detail.error || results.error) && <p className="connected-alert" role="alert">{(error || detail.error || results.error).message}</p>}
+    <div className="connected-actions">
+      <button className={'btn ' + (hidden ? 'outline' : 'primary')} aria-pressed={!hidden} disabled={busy} onClick={() => showDeleted(false)}>历史订单</button>
+      <button className={'btn ' + (hidden ? 'primary' : 'outline')} aria-pressed={hidden} disabled={busy} onClick={() => showDeleted(true)}>已删除</button>
+    </div>
+    <p className="muted">删除会把档案移到「已删除」，可以恢复。进行中的订单仍可在「订单与风险」处理。</p>
+    {notice && <p role="status">{notice}</p>}
     <div className="feature-form">
       <label>查订单<input value={filter} placeholder="标题、编号或城市" onChange={e => setFilter(e.target.value)} /></label>
       <label>订单类型<select value={kind} onChange={e => setKind(e.target.value)}>
@@ -99,25 +130,30 @@ export function Archive() {
       <label>履约阶段<select value={stage} onChange={e => setStage(e.target.value)}>
         <option value="">全部</option>{Object.entries(stageNames).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
       </select></label>
-      <label><input type="checkbox" checked={hidden} onChange={e => { setHidden(e.target.checked); setSelected(''); }} /> 查看已移除档案</label>
     </div>
     {!shown.length && <p className="muted">{data ? '没有符合条件的订单。' : '正在读取档案…'}</p>}
     <ul className="connected-tasks">{shown.map(item => <li key={item.id}>
-      <button className="btn outline small" onClick={() => setSelected(item.id)}>{item.title}</button>
-      <p>{item.source_id} · {item.city || '地点待确认'} · {stageNames[item.stage]} · {item.outcome}</p>
+      <div className="archive-row-actions">
+        <button className="btn outline small" onClick={() => setSelected(item.id)}>{item.title}</button>
+        {hidden ? (item.hidden_by_case ? <span className="muted">请先恢复关联的团建订单</span> :
+          <button className="btn outline small" disabled={busy} onClick={() => changeArchive(item)}>恢复</button>) :
+          confirmRemove !== item.id && <button className="btn outline small" disabled={busy}
+            onClick={() => setConfirmRemove(item.id)}>删除</button>}
+      </div>
+      <p className="order-number">{item.display_number || item.source_id} · {item.city || '地点待确认'} · {stageNames[item.stage]} · {item.outcome}</p>
+      {confirmRemove === item.id && <div className="archive-row-actions">
+        <span>确定把这笔订单移到「已删除」？</span>
+        <button className="btn primary small" disabled={busy} onClick={() => changeArchive(item)}>确认删除</button>
+        <button className="btn outline small" disabled={busy} onClick={() => setConfirmRemove('')}>取消</button>
+      </div>}
     </li>)}</ul>
     {detail.data && <section className="feature-card">
       <h2>{detail.data.title}</h2>
+      {detail.data.display_number && <p className="order-number">{detail.data.display_number} · 原编号 {detail.data.source_id}</p>}
       <div className="connected-actions">
         <a className="btn primary" href={'/api' + path + '?download=true'}>下载完整档案</a>
         <a className="btn outline" href={orderLink(detail.data.kind === 'supplier' && detail.data.snapshot.case_id
           ? 'case:' + detail.data.snapshot.case_id : detail.data.id)}>在工作台查看</a>
-        <button className="btn outline" disabled={busy} onClick={() => {
-          if (hidden || window.confirm('把这份档案从列表移除？可以恢复。')) {
-            save(path, { active: hidden }, hidden ? '档案已恢复。' : '已从档案列表移除。');
-            setSelected('');
-          }
-        }}>{hidden ? '恢复档案' : '从列表移除'}</button>
       </div>
       <details><summary>查看完整档案内容</summary><pre className="feature-text">{JSON.stringify(detail.data.snapshot, null, 2)}</pre></details>
       <details><summary>管理检索用的记录片段</summary>
@@ -150,7 +186,6 @@ export function Archive() {
         <p>{item.text}</p><button className="btn outline small" onClick={() => setSelected(item.document_id)}>打开来源档案</button>
       </li>)}</ul>
     </>}
-    {notice && <p role="status">{notice}</p>}
   </>;
 }
 

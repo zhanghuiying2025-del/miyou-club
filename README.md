@@ -10,10 +10,13 @@
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 npm.cmd --prefix frontend/customer ci
+$env:VITE_SHOW_OWNER_DEMO_LINK = 'true'
 npm.cmd --prefix frontend/customer run build
 npm.cmd --prefix frontend/boss ci
 npm.cmd --prefix frontend/boss run build
 ```
+
+`VITE_SHOW_OWNER_DEMO_LINK` 仅用于演示构建。正式构建前将它设为 `false`，客户端导航就会隐藏老板端入口。
 
 ### 2. 配置 AI 模型
 

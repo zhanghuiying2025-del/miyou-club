@@ -3,13 +3,23 @@ import unittest
 from unittest.mock import patch, AsyncMock
 import asyncio
 from types import SimpleNamespace
+from httpx import Request
+from openai import APITimeoutError
 from pydantic import ValidationError
 
-from src.agents import build_agent_team, is_mimo_endpoint, task_timeout
+from src.agents import AgentOutputError, build_agent_team, is_mimo_endpoint, run_structured, task_timeout
 from src.models import BookingFinancialReview, BookingSpeech, CaseStatus, CouncilDecision, TravelCase
 
 
 class MimoConfigurationTests(unittest.TestCase):
+    def test_wrapped_transport_timeout_is_reported_as_retryable(self):
+        async def slow(*args):
+            error = APITimeoutError(request=Request("POST", "https://example.test/chat/completions"))
+            raise RuntimeError("SDK wrapper") from error
+
+        with self.assertRaisesRegex(AgentOutputError, "模型接口等待超时.*重试"):
+            asyncio.run(run_structured(SimpleNamespace(run=slow), "测试", CouncilDecision))
+
     def test_mimo_options_reach_all_three_agents_without_sdk_retries(self):
         with patch.dict(os.environ, {"LLM_API_KEY": "test-key", "LLM_BASE_URL": "https://api.xiaomimimo.com/v1",
                                     "LLM_MODEL": "mimo-v2.6-pro"}), patch(
@@ -20,6 +30,7 @@ class MimoConfigurationTests(unittest.TestCase):
             self.assertEqual(agent.call_count, 3)
             for call in agent.call_args_list:
                 self.assertEqual(call.kwargs["default_options"]["extra_body"]["thinking"]["type"], "disabled")
+                self.assertEqual(call.kwargs["default_options"]["extra_body"]["response_format"], {"type": "json_object"})
             self.assertEqual(task_timeout(8), 30)
             self.assertEqual(task_timeout(60), 60)
 

@@ -103,6 +103,16 @@ def report_event(demo, kind, details=""):
     return event
 
 
+def reopen_held_event(demo):
+    if demo.status != "held" or not demo.events or demo.events[-1].status != "held":
+        raise ValueError("当前没有可重新核查的暂停事件")
+    previous = demo.events[-1]
+    event = JourneyEvent(kind=previous.kind, tick=demo.tick, description=previous.description, source=previous.source)
+    demo.events.append(event)
+    demo.status = "awaiting_agent"
+    return event
+
+
 def validate_response(demo: JourneyDemo, response: JourneyResponse) -> None:
     indices = [item.schedule_index for item in response.adjustments]
     if len(indices) > 2 or len(indices) != len(set(indices)) or any(i < current_index(demo) or i >= len(demo.active_schedule) for i in indices):

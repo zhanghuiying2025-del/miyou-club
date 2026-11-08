@@ -13,7 +13,7 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     fs: { allow: [fileURLToPath(new URL("..", import.meta.url))] },
-    proxy: { "/api": "http://127.0.0.1:8000" },
+    proxy: { "/api": "http://127.0.0.1:8000", "/boss": "http://127.0.0.1:8000" },
     warmup: {
       clientFiles: ["./src/main.jsx"],
     },

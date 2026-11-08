@@ -7,6 +7,7 @@ import time
 from src import activity_order, company_store, procurement, storage, supplier_simulation
 from src.journey import pending_event
 from src.models import CaseStatus, TravelCase
+from src.order_labels import case_number, supplier_number
 from src.runtime import active_jobs, progress_events
 from src.supplier_models import SupplierOrder
 from src.workflow import TravelAgencyWorkflow
@@ -277,6 +278,7 @@ def _task_row(order, actor, title, status, detail, source="", elapsed=None, **co
 def _tasks_for(row, entity_id, records):
     jobs = list(active_jobs(entity_id))
     tasks = []
+    completed_steps = set()
     for record in reversed(records):
         status = record.get("status", "completed")
         detail = record.get("error") or record.get("result_summary") or record.get("summary") or record.get("detail") or ""
@@ -291,10 +293,18 @@ def _tasks_for(row, entity_id, records):
                 elapsed = round(max(0, time.monotonic() - job.started), 1)
         elif status == "failed" and "前次执行中断" in detail:
             status = "interrupted"
+        title = record.get("task") or "业务任务"
+        input_summary = record.get("input_summary", "")
+        expected = record.get("expected_result", "")
+        step = (actor, title, expected, input_summary)
+        # Scan newest first. Earlier successes and other plan versions cannot resolve a later failure.
+        recovered = status in {"failed", "interrupted"} and step in completed_steps
+        if status == "completed" and expected and input_summary:
+            completed_steps.add(step)
         tasks.append(_task_row(
-            row, actor, record.get("task") or "业务任务", status, detail, record.get("source", ""),
-            elapsed, sender=record.get("sender", ""), expected_result=record.get("expected_result", ""),
-            input_summary=record.get("input_summary", ""), created_at=record.get("created_at"),
+            row, actor, title, status, detail, record.get("source", ""),
+            elapsed, sender=record.get("sender", ""), expected_result=expected,
+            input_summary=input_summary, created_at=record.get("created_at"), recovered=recovered,
         ))
     for job in jobs:
         default_actor, title = _JOB_LABELS.get(job.key[0], ("团队", "后台任务"))
@@ -389,9 +399,8 @@ def _supplier_results(orders, leads, campaigns, cash):
 
 def load_owner_dashboard(*, activity_tracking=False):
     """Summarize real saved demo records and current jobs without changing business state."""
-    cases = [TravelCase.model_validate(row["case"]) for row in sorted(
-        storage.saved_case_snapshots(), key=lambda row: row.get("updated_at", ""), reverse=True
-    )]
+    saved = sorted(storage.saved_case_snapshots(), key=lambda row: row.get("updated_at", ""), reverse=True)
+    cases = [TravelCase.model_validate(row["case"]) for row in saved]
     suppliers, leads, campaigns, cash = _company_snapshot()
     travel, travel_rows = _travel_results(cases)
     supplier_metrics, campaign_rows, supplier_rows = _supplier_results(suppliers, leads, campaigns, cash)
@@ -404,7 +413,7 @@ def load_owner_dashboard(*, activity_tracking=False):
         if supplier.case_id and supplier.status != "cancelled":
             supplier_by_case.setdefault(supplier.case_id, supplier)
     linked = set()
-    for case in cases:
+    for case, record in zip(cases, saved):
         supplier = supplier_by_id.get(case.supplier_order_id)
         if (not case.supplier_order_id and case.service_mode == "travel_planning" and case.status == CaseStatus.COMPLETED
                 and not (case.procurement_order or case.journey_demo)):
@@ -414,6 +423,7 @@ def load_owner_dashboard(*, activity_tracking=False):
             case_id=case.id, supplier_order_id=supplier.id if supplier else None,
         )
         row["case_status"] = case.status.value
+        row["display_number"] = case_number(record["case"])
         if case.procurement_order:
             row["procurement_order_id"] = case.procurement_order.id
             if any(p.kind in {"customer_deposit", "customer_balance"} and p.amount_yuan > 0
@@ -438,12 +448,13 @@ def load_owner_dashboard(*, activity_tracking=False):
             "supplier", supplier.id, _supplier_title(supplier), _supplier_flow(supplier),
             case_id=supplier.case_id, supplier_order_id=supplier.id,
         )
+        row["display_number"] = supplier_number(supplier.id, supplier.need.check_in, supplier.need.check_out)
         _order_details(row, None, supplier)
         orders.append(row)
         tasks.extend(_tasks_for(row, supplier.id, supplier.handoffs))
 
     task_order = {"running": 0, "failed": 1, "interrupted": 2, "completed": 3}
-    tasks.sort(key=lambda task: task_order.get(task["status"], 4))
+    tasks.sort(key=lambda task: 4 if task.get("recovered") else task_order.get(task["status"], 4))
     return {
         "travel": travel, "supplier": supplier_metrics, "orders": orders, "tasks": tasks,
         "main_orders": {"paid": len(paid_cases), "settled": len(settled_cases)},

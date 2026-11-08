@@ -4,7 +4,7 @@ import {
   Coins, House, Layers, Menu, RefreshCw, Search, ShieldCheck, TriangleAlert, UserRound, UsersRound,
 } from 'lucide-react';
 import { api, money, useResource } from '../../shared/api.js';
-import { Archive, Exceptions, Lessons, Operations, OrderExtras } from './Features.jsx';
+import { Archive, Exceptions, Lessons, Operations, OrderExtras, problemText, taskStep } from './Features.jsx';
 import './connected.css';
 
 const navigation = [
@@ -83,7 +83,7 @@ export function App() {
           {page.section === 'orders' && (page.key ? <OrderDetail key={page.key} orderKey={page.key} refreshDashboard={dashboard.refresh} />
             : <OrderList rows={data.orders} search empty="没有找到订单。" />)}
           {page.section === 'team' && <TaskList rows={data.tasks} empty="目前还没有 AI 团队任务。" />}
-          {page.section === 'errors' && <Exceptions tasks={problems} orders={data.orders} allTasks={data.tasks} />}
+          {page.section === 'errors' && <Exceptions tasks={problems} orders={data.orders} />}
           {page.section === 'archive' && <Archive />}
           {page.section === 'lessons' && <Lessons />}
           {page.section === 'operations' && <Operations />}
@@ -108,6 +108,7 @@ function Login({ onLogin }) {
   const [error, setError] = useState('');
   async function submit(event) {
     event.preventDefault();
+    if (busy || !password.trim()) return;
     setBusy(true);
     setError('');
     try {
@@ -123,7 +124,7 @@ function Login({ onLogin }) {
     <h1>咪游社 · 老板工作台</h1><p>请输入启动服务时设置的老板口令。</p>
     <label>老板口令<input type="password" autoComplete="current-password" value={password} required onChange={event => setPassword(event.target.value)} /></label>
     {error && <p className="connected-alert" role="alert">{error}</p>}
-    <button className="btn primary" disabled={busy}>登录</button><a href="/">返回用户端</a>
+    <button className="btn primary" disabled={busy || !password.trim()}>登录</button><a href="/">返回用户端</a>
   </form></main>;
 }
 
@@ -136,7 +137,7 @@ function Overview({ data, pending, problems }) {
   const groups = [
     ['待审批', pending.length, '需要你做出决策后才能继续', 'approvals', ClipboardCheck, 'approval-card'],
     ['订单与风险', data.orders.length, '查看从需求到交付的进度', 'orders', TriangleAlert, 'intervention-card'],
-    ['运行异常', problems.length, '查看失败或中断的工作', 'errors', CircleX, 'error-card'],
+    ['待处理异常', problems.filter(task => !task.recovered).length, '查看失败或中断的工作', 'errors', CircleX, 'error-card'],
   ];
   return <>
     <section className="hero">
@@ -159,23 +160,31 @@ function Overview({ data, pending, problems }) {
 
 function OrderList({ rows, search = false, empty }) {
   const [query, setQuery] = useState('');
-  const visible = rows.filter(row => (row.title + ' ' + row.source_id).toLowerCase().includes(query.trim().toLowerCase()));
+  const visible = rows.filter(row => [row.title, row.display_number, row.source_id].join(' ').toLowerCase().includes(query.trim().toLowerCase()));
   return <>
     {search && <label className="search-field"><Search size={18} /><input placeholder="搜索活动名称或订单号" value={query}
       onChange={event => setQuery(event.target.value)} /></label>}
     {!visible.length && <p className="muted">{empty}</p>}
     <div className="order-list">{visible.map(order => <a className="order-card" href={orderHref(order.key)} key={order.key}>
-      <div className="order-card-top"><div><h3>{order.title}</h3><p>{order.source_id}</p></div><ChevronRight size={18} /></div>
+      <div className="order-card-top"><div><h3>{order.title}</h3><p className="order-number">{order.display_number || order.source_id}</p></div><ChevronRight size={18} /></div>
       <div className="order-card-bottom"><span className="tag green">{order.stage}</span><span>{order.next_actor}</span></div>
     </a>)}</div>
   </>;
 }
 
 function TaskList({ rows, empty }) {
-  return rows.length ? <ul className="connected-tasks">{rows.map((task, index) =>
-    <li key={task.order_key + ':' + index}><a href={orderHref(task.order_key)}><strong>{task.actor} · {task.title}</strong></a>
-      <span className="tag neutral">{taskLabels[task.status] || task.status}</span>
-      <p>{task.order_title}{task.detail && ' · ' + task.detail}</p></li>)}</ul> : <p className="muted">{empty}</p>;
+  return rows.length ? <ul className="connected-tasks">{rows.map((task, index) => {
+    const problem = exception(task);
+    return <li key={task.order_key + ':' + index}>
+      <a href={orderHref(task.order_key)}><strong>{task.actor} · {taskStep(task) || task.title}</strong></a>
+      <span className="tag neutral">{task.recovered ? '已恢复 · 历史异常' : taskLabels[task.status] || task.status}</span>
+      <p>{task.order_title}{task.created_at && ' · ' + new Date(task.created_at).toLocaleString('zh-CN', { hour12: false })}</p>
+      {problem ? <>
+        <p>{problemText(task).reason}</p>
+        {task.detail && <details><summary>查看技术记录</summary><p>{task.title} · {task.detail}</p></details>}
+      </> : task.detail && <p>{task.detail}</p>}
+    </li>;
+  })}</ul> : <p className="muted">{empty}</p>;
 }
 
 function OrderDetail({ orderKey, refreshDashboard }) {
@@ -209,7 +218,8 @@ function OrderDetail({ orderKey, refreshDashboard }) {
   return <>
     <a className="text-link" href="#/orders"><ArrowLeft size={16} />返回订单与风险</a>
     <div className="order-detail-title"><span className="tag green">{data.stage}</span><h2>{data.title}</h2>
-      <p>{data.source_id}{booking && ' · ' + booking.id}</p></div>
+      <p className="order-number">{data.display_number || data.source_id}</p>
+      {data.display_number && <p>原编号 {data.source_id}{booking && booking.id !== data.source_id && ' · 预订 ' + booking.id}</p>}</div>
     <div className="fact-grid"><Fact label="下一处理人" value={data.next_actor} />
       <Fact label="当前状态" value={data.blocker || '—'} />
       {data.after_approval && <Fact label="处理后" value={data.after_approval} />}</div>

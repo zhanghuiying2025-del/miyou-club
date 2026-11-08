@@ -9,6 +9,7 @@ from contextlib import closing
 
 from src import storage, company_store
 from src.models import TravelCase
+from src.order_labels import case_number, supplier_number
 
 
 KIND_LABELS = {"requirements": "需求", "plan": "方案", "decision": "决策与取舍",
@@ -53,6 +54,7 @@ def documents():
         stage = "completed" if settled else "delivered" if delivered else (
             "plan_confirmed" if raw.get("status") == "completed" else "in_progress")
         result.append({"id": "case:" + raw["id"], "source_id": raw["id"], "kind": "case",
+            "display_number": case_number(raw),
             "title": req.get("event_name") or raw.get("customer_request", "")[:60],
             "city": req.get("city") or "", "style": req.get("preferred_style") or "",
             "stage": stage, "status": raw.get("status", "new"),
@@ -65,6 +67,7 @@ def documents():
         stage = "completed" if raw.get("status") == "completed" else (
             "delivered" if raw.get("delivered") else "in_progress")
         result.append({"id": "supplier:" + raw["id"], "source_id": raw["id"], "kind": "supplier",
+            "display_number": supplier_number(raw["id"], need.get("check_in"), need.get("check_out")),
             "title": f"{need.get('city', '')}酒店餐饮 · {raw.get('customer_id', '')}",
             "city": need.get("city", ""), "style": "", "stage": stage,
             "status": raw.get("status", "inquiring"), "service": "supplier_booking",

@@ -8,9 +8,10 @@ from typing import Literal
 from pydantic import BaseModel, Field, UUID4, field_validator
 
 from src import storage, supplier_simulation as suppliers
-from src.agents import AgentConfigurationError, build_agent_team
+from src.agents import AgentConfigurationError, AgentOutputError, build_agent_team
 from src.models import CaseStatus, CustomerStyleFeedback, OutcomeFeedback, PlanAcceptanceFeedback, RequirementSpec
 from src.operations import register_lead
+from src.order_labels import case_number
 from src.runtime import active_jobs, submit_once
 from src.supplier_models import BookingNeed, MealSlot
 from src.workflow import TravelAgencyWorkflow, WorkflowError
@@ -90,6 +91,9 @@ def planning_active(case_id):
     return any(job.key[0] == "planning" for job in active_jobs(case_id))
 
 
+PLANNING_TIMEOUT_SECONDS = 240
+
+
 def enqueue(case, action, operation):
     def run():
         initial_status = case.status
@@ -97,7 +101,7 @@ def enqueue(case, action, operation):
         try:
             team = workflow()
             team.checkpoint_callback = storage.save_case_to_disk
-            asyncio.run(asyncio.wait_for(operation(team, case), timeout=240))
+            asyncio.run(asyncio.wait_for(operation(team, case), timeout=PLANNING_TIMEOUT_SECONDS))
         except storage.CaseConflictError:
             return
         except Exception as exc:
@@ -106,6 +110,10 @@ def enqueue(case, action, operation):
                     case.resume_status, case.status = case.status, CaseStatus.FAILED
             if isinstance(exc, AgentConfigurationError):
                 case.error_message = "模型配置缺失，请检查服务端模型配置后重试。"
+            elif isinstance(exc, AgentOutputError):
+                case.error_message = str(exc)
+            elif isinstance(exc, TimeoutError):
+                case.error_message = f"团队处理超过{PLANNING_TIMEOUT_SECONDS}秒，可从已保存步骤重试。"
             elif isinstance(exc, WorkflowError):
                 case.error_message = "操作未完成：" + str(exc)
             else:
@@ -132,8 +140,35 @@ def start_planning(case, attachments=()):
     enqueue(case, "start", begin)
 
 
+def pending_direction_action(case):
+    if case.pending_direction_question:
+        return "question"
+    if case.pending_direction_revision:
+        return "revise_direction"
+    return None
+
+
+async def process_direction_feedback(team, case):
+    await team.resume_case(case)
+    if case.pending_direction_question:
+        await team.submit_style_feedback(case, CustomerStyleFeedback(question=case.pending_direction_question), question_only=True)
+        case.pending_direction_question = ""
+    else:
+        await team.revise_direction(case, case.pending_direction_revision)
+        case.pending_direction_revision = ""
+
+
+async def process_plan_rework(team, case):
+    await team.resume_case(case)
+    await team.rework_rejected_plan(case)
+
+
 def retry_planning(case):
-    if case.resume_status == CaseStatus.WAITING_REQUIREMENTS:
+    if action := pending_direction_action(case):
+        enqueue(case, action, process_direction_feedback)
+    elif case.resume_status == CaseStatus.NEEDS_REWORK:
+        enqueue(case, "rework", process_plan_rework)
+    elif case.resume_status == CaseStatus.WAITING_REQUIREMENTS:
         case.status, case.resume_status = CaseStatus.WAITING_REQUIREMENTS, None
         case.error_message = None
         storage.save_case_to_disk(case)
@@ -212,6 +247,8 @@ def customer_actions(case, booking):
     status = case.status
     if planning_active(case.id):
         return []
+    if pending_direction_action(case):
+        return ["retry"]
     if case.service_mode in {"document_intake", "activity_review"}:
         from src.web_activity import document_actions
         return document_actions(case)
@@ -240,11 +277,14 @@ def customer_actions(case, booking):
         return [] if case.procurement_order or case.journey_demo else ["request_quotes"]
     order, _ = booking
     if order.status == "inquiring":
-        return ["refresh_quotes"] if not order.quotes else ["select_quotes"]
+        if not order.quotes:
+            return ["refresh_quotes"]
+        usable = any(q.capacity_ok and suppliers.quote_current(order, q) for q in order.quotes)
+        return ["select_quotes"] if usable else ["select_quotes", "refresh_quotes"]
     if order.status == "waiting_customer":
-        return ["select_quotes", "confirm_contract"] if contract_view(order) else ["select_quotes"]
+        return ["select_quotes", "confirm_contract"] if contract_view(order) else ["select_quotes", "refresh_quotes"]
     if order.status == "customer_confirmed":
-        return ["pay_deposit"] if contract_view(order) else ["select_quotes"]
+        return ["pay_deposit"] if contract_view(order) else ["select_quotes", "refresh_quotes"]
     if order.status == "paid" and not order.supplier_paid_cents and contract_view(order) is None:
         return ["select_quotes", "refresh_quotes"]
     if order.status == "confirmed":
@@ -261,6 +301,8 @@ def customer_actions(case, booking):
 def owner_actions(case, booking):
     if case and planning_active(case.id):
         return []
+    if case and pending_direction_action(case):
+        return ["retry"]
     if case and case.service_mode in {"document_intake", "activity_review"}:
         from src.web_activity import document_actions
         return document_actions(case, owner=True)
@@ -301,15 +343,19 @@ def booking_view(booking, *, owner=False):
     if owner and contract:
         contract["supplier_deposit_cents"] = (summary["resource_cents"] * 30 + 50) // 100
         contract["supplier_total_cents"] = summary["resource_cents"]
+    quotes = []
+    for quote in order.quotes:
+        current = suppliers.quote_current(order, quote)
+        quotes.append({
+            "id": quote.id, "kind": quote.kind, "supplier_name": quote.supplier_name, "meal_keys": quote.meal_keys,
+            "total_cents": quote.total_cents, "available": quote.capacity_ok and current, "details": quote.details,
+            "blockers": quote.blockers if current else ["报价已过期或库存已变化，请重新查询报价", *quote.blockers],
+        })
     return {
         "id": order.id, "status": order.status, "revision": revision,
         "contract": contract, "customer_paid_cents": order.customer_paid_cents,
         "selected_quote_ids": order.selected_quote_ids,
-        "quotes": [{
-            "id": q.id, "kind": q.kind, "supplier_name": q.supplier_name, "meal_keys": q.meal_keys,
-            "total_cents": q.total_cents, "available": q.capacity_ok and suppliers.quote_current(order, q),
-            "details": q.details, "blockers": q.blockers,
-        } for q in order.quotes],
+        "quotes": quotes,
         "receipts": order.confirmations,
     }
 
@@ -330,6 +376,18 @@ def activity_view(case):
     booking = booking_for(case)
     req = case.requirements
     review = case.feedback_assessment
+    audit = reversed(case.audit_log)
+    latest_feedback = next((event for event in audit if event.action in {
+        "direction_question_submitted", "direction_revised",
+    }), None)
+    assessment = next(audit, None)
+    question_reply = None
+    # Confirming a direction adds an audit entry but keeps the previous question's assessment.
+    if (review and latest_feedback and latest_feedback.action == "direction_question_submitted"
+            and assessment and assessment.action == "style_feedback_assessed" and assessment.detail == review.rationale):
+        question_reply = {"question": latest_feedback.detail, "answer": review.customer_response,
+                          "answered_at": latest_feedback.timestamp.isoformat()}
+    jobs = active_jobs(case.id)
     actions = customer_actions(case, booking)
     status = customer_status(case)
     error = case.error_message or ""
@@ -337,13 +395,18 @@ def activity_view(case):
         error = "团队处理未完成，请查看可执行操作。" if case.status == CaseStatus.FAILED else ""
     return {
         "id": case.id, "revision": case.storage_revision, "status": status,
+        "display_number": case_number(case.model_dump(mode="json", include={"id", "requirements", "audit_log"})),
         "service_mode": case.service_mode,
         "title": req.event_name if req else "团建活动",
         "requirements": req.model_dump(mode="json") if req else None,
-        "running": planning_active(case.id), "actions": actions, "plans": plan_views(case),
+        "running": any(job.key[0] == "planning" for job in jobs), "actions": actions, "plans": plan_views(case),
         "updates": [x.model_dump(mode="json") for x in case.public_updates[-12:]],
         "questions": customer_questions(case, status),
         "message": review.customer_response if review else "",
+        "question_reply": question_reply,
+        "pending_question": case.pending_direction_question,
+        "pending_revision": case.pending_direction_revision,
+        "question_pending": any(job.key[0] == "planning" and job.key[-1] == "question" for job in jobs),
         "error": error,
         "booking": booking_view(booking),
         "attachments": [item.model_dump(mode="json") for item in case.attachment_insights],
@@ -386,14 +449,21 @@ def customer_action(case, payload):
         if case.pending_supplement:
             enqueue(case, action, lambda team, item: team.advance(item))
         return
-    if action in {"confirm_direction", "question", "revise_direction", "confirm_draft", "answer", "accept_plan", "rework"}:
+    if action in {"question", "revise_direction"}:
+        if action == "question":
+            case.pending_direction_question = payload.note.strip()
+        else:
+            case.pending_direction_revision = payload.note.strip()
+        storage.save_case_to_disk(case)
+        enqueue(case, action, process_direction_feedback)
+        return
+    if action == "rework":
+        enqueue(case, action, process_plan_rework)
+        return
+    if action in {"confirm_direction", "confirm_draft", "answer", "accept_plan"}:
         async def apply(team, item):
             if action == "confirm_direction":
                 await team.submit_style_feedback(item, CustomerStyleFeedback())
-            elif action == "question":
-                await team.submit_style_feedback(item, CustomerStyleFeedback(question=payload.note), question_only=True)
-            elif action == "revise_direction":
-                await team.revise_direction(item, payload.note)
             elif action == "confirm_draft":
                 await team.submit_draft_feedback(item, [], "")
             elif action == "answer":
@@ -402,8 +472,6 @@ def customer_action(case, payload):
             elif action == "accept_plan":
                 team.submit_plan_acceptance(item, PlanAcceptanceFeedback(outcome=payload.outcome,
                                             selected_option_ids=payload.options, comment=payload.note))
-            elif action == "rework":
-                await team.rework_rejected_plan(item)
 
         enqueue(case, action, apply)
         return

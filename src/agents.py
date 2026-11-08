@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from agent_framework import Agent, Content, Message
 from agent_framework.openai import OpenAIChatCompletionClient
 from dotenv import load_dotenv
+from openai import APITimeoutError
 from pydantic import BaseModel, ValidationError
 from src.stage_schemas import compact_schema, decode_response, wire_model
 
@@ -73,8 +74,12 @@ def build_agent_team() -> AgentTeam:
     # The SDK's 5s connection default can expire during local DNS resolution.
     # Keep bounded outer deadlines and let the UI control explicit retries.
     client.client = client.client.with_options(timeout=75 if is_mimo_endpoint(base_url) else 45, max_retries=0)
-    defaults = ({"extra_body": {"thinking": {"type": "disabled"}}}
-        if is_mimo_endpoint(base_url) else {})
+    defaults = {}
+    if is_mimo_endpoint(base_url):
+        extra_body = {"thinking": {"type": "disabled"}}
+        if model in {"mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.6-pro-ultraspeed"}:
+            extra_body["response_format"] = {"type": "json_object"}
+        defaults = {"extra_body": extra_body}
     return AgentTeam(
         manager=Agent(client=client, name="project_manager", instructions=MANAGER_INSTRUCTIONS, default_options=defaults),
         planner=Agent(client=client, name="multi_role_planner", instructions=PLANNER_INSTRUCTIONS, default_options=defaults),
@@ -106,7 +111,16 @@ def _decode_structured_text(response_model, text: str):
         opening = re.search(r"[\[{]", text[offset:])
         if opening is None:
             break
-        payload, offset = decoder.raw_decode(text, offset + opening.start())
+        start = offset + opening.start()
+        try:
+            payload, offset = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            # Allow a plain Chinese label such as [说明] without scanning inside malformed JSON.
+            label = re.match(r"\[[\u3400-\u9fff][^\[\]{}\"\r\n]*\]", text[start:])
+            if label is None:
+                raise
+            offset = start + label.end()
+            continue
         if not isinstance(payload, dict):
             continue
         try:
@@ -141,6 +155,8 @@ async def _invoke(agent, payload, response_model):
     except AgentOutputError:
         raise
     except Exception as exc:
+        if isinstance(exc, APITimeoutError) or isinstance(exc.__cause__, APITimeoutError):
+            raise AgentOutputError("模型接口等待超时，可从已保存步骤重试") from exc
         raise AgentOutputError(f"调用 Agent 失败：{exc}") from exc
 
 

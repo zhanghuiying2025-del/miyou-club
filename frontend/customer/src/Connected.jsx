@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { money, useResource } from '../../shared/api.js';
 import { activityPath, customerApi, planUrl, workspaceUrl } from './api.js';
 import { DeliveryFeedback, Documents } from './Features.jsx';
@@ -38,7 +38,7 @@ export function ActivityList({ draft, onStart }) {
     {data?.length === 0 && <p>还没有提交过活动。</p>}
     <div className="connected-grid">{data?.map(item =>
       <a className="connected-panel activity-link" key={item.id} href={workspaceUrl(item.id)}>
-        <h2>{item.title}</h2><p>{bookingStages[item.booking_status] || stages[item.status] || item.status}</p><small>{item.id}</small>
+        <h2>{item.title}</h2><p>{bookingStages[item.booking_status] || stages[item.status] || item.status}</p><small>{item.display_number || item.id}</small>
       </a>)}</div>
   </main>;
 }
@@ -46,12 +46,24 @@ export function ActivityList({ draft, onStart }) {
 export function ActivityWorkspace({ id, planId, planList }) {
   const path = activityPath(id);
   const { data: activity, error, refresh, replace } = useResource(path, customerApi, 2200);
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState('');
+  const busy = Boolean(busyAction);
   const [actionError, setActionError] = useState('');
+  const replyCard = useRef(null);
+  const previousReply = useRef(null);
+  const questionPending = busyAction === 'question' || activity?.question_pending;
+  const answeredAt = activity?.question_reply?.answered_at;
+
+  useEffect(() => {
+    if (questionPending || !answeredAt || previousReply.current === null || answeredAt === previousReply.current) return;
+    previousReply.current = null;
+    replyCard.current?.scrollIntoView({ block: 'nearest' });
+  }, [answeredAt, questionPending]);
 
   async function submit(action, input = {}) {
     if (busy) return;
-    setBusy(true);
+    previousReply.current = action === 'question' ? (answeredAt || '') : null;
+    setBusyAction(action);
     setActionError('');
     try {
       replace(await customerApi(path + '/actions', {
@@ -60,10 +72,11 @@ export function ActivityWorkspace({ id, planId, planList }) {
       }));
       refresh();
     } catch (problem) {
+      previousReply.current = null;
       setActionError(problem.message);
       refresh();
     } finally {
-      setBusy(false);
+      setBusyAction('');
     }
   }
 
@@ -79,6 +92,13 @@ export function ActivityWorkspace({ id, planId, planList }) {
   const isWorkspace = !planId && !planList;
   const booking = activity.booking;
   const allowed = new Set(activity.actions);
+  const requirements = activity.requirements;
+  const activityFacts = requirements ? [
+    requirements.city, requirements.event_date,
+    requirements.participant_count == null ? '' : `${requirements.participant_count} 人`,
+    requirements.duration,
+    requirements.budget_yuan == null ? '' : `总预算 ${money(requirements.budget_yuan * 100)}`,
+  ].filter(Boolean).join(' · ') : '';
   const button = (action, input) => <button className="button" disabled={busy || activity.running}
     onClick={() => submit(action, input)}>{buttonLabels[action]}</button>;
 
@@ -87,13 +107,11 @@ export function ActivityWorkspace({ id, planId, planList }) {
     <p className="eyebrow">{booking ? bookingStages[booking.status] || booking.status :
       activity.service_mode === 'activity_review' && activity.status === 'completed' ? '审核清单已收到' : stages[activity.status]}</p>
     <h1 className="display-heading">{plan?.title || activity.title}</h1>
-    {activity.requirements && <p>{activity.requirements.city} · {activity.requirements.event_date} ·
-      {' '}{activity.requirements.participant_count} 人 · {activity.requirements.duration} ·
-      {' '}总预算 {money(activity.requirements.budget_yuan * 100)}</p>}
-    <p className="connected-case-id">案件编号 {activity.id}</p>
+    {activityFacts && <p>{activityFacts}</p>}
+    <p className="connected-case-id">案件编号 {activity.display_number || activity.id}</p>
     {(actionError || error || activity.error) && <p className="connected-error" role="alert">{actionError || error?.message || activity.error}</p>}
-    {activity.running && <p role="status">AI 团队正在处理。进度会自动更新。</p>}
-    {activity.status === 'waiting_style_feedback' && activity.message && <p>{activity.message}</p>}
+    {activity.running && !questionPending && <p role="status">AI 团队正在处理。进度会自动更新。</p>}
+    {activity.status === 'waiting_style_feedback' && !questionPending && !activity.question_reply && activity.message && <p>{activity.message}</p>}
     {!isWorkspace && (allowed.has('request_quotes') || booking) && <div className="connected-actions">
       <a className="button" href={workspace}>{booking ? '查看预订和付款进度' : '方案已确认，查询报价'}</a>
     </div>}
@@ -117,7 +135,24 @@ export function ActivityWorkspace({ id, planId, planList }) {
       {['start', 'retry', 'confirm_direction', 'confirm_draft', 'rework'].filter(action => allowed.has(action))
         .map(action => <React.Fragment key={action}>{button(action)}</React.Fragment>)}
     </div>
-    {['answer', 'question', 'revise_direction', 'supplement'].filter(action => allowed.has(action))
+    {(allowed.has('question') || questionPending) && <NoteAction action="question" busy={busy || questionPending} submit={submit} />}
+    <div aria-live="polite">
+      {questionPending ? <p className="connected-panel question-reply">
+        {activity.question_pending ? '已提交，项目经理正在处理你的质疑…' : '正在提交你的质疑…'}
+      </p> : activity.pending_question ? <section className="connected-panel question-reply" aria-label="已保存的质疑">
+          <h2>质疑已保存，等待继续处理</h2>
+          <p className="question-reply-original"><strong>你的质疑</strong> {activity.pending_question}</p>
+          <p>点击「继续处理」可以重试这条质疑。</p>
+        </section> : activity.question_reply && <section ref={replyCard} className="connected-panel question-reply" aria-label="质疑回复">
+          <h2>项目经理的回复</h2>
+          <p className="question-reply-original"><strong>你的质疑</strong> {activity.question_reply.question}</p>
+          <p>{activity.question_reply.answer || '已记录这条质疑，暂时没有回复内容。'}</p>
+        </section>}
+    </div>
+    {!activity.running && activity.pending_revision && <section className="connected-panel" aria-label="已保存的修改要求">
+      <h2>修改要求已保存</h2><p>{activity.pending_revision}</p><p>点击「继续处理」可以重试这次修改。</p>
+    </section>}
+    {['answer', 'revise_direction', 'supplement'].filter(action => allowed.has(action))
       .map(action => <NoteAction key={action} action={action} busy={busy} submit={submit} />)}
     {allowed.has('accept_plan') && <PlanConfirmation busy={busy} submit={submit} options={activity.feedback_options} />}
     {isWorkspace && allowed.has('request_quotes') && <BookingRequest key={activity.id} activity={activity} busy={busy} submit={submit} />}
@@ -210,7 +245,8 @@ function BookingRequest({ activity, busy, submit }) {
 }
 
 function Booking({ caseId, booking, allowed, schedule, button, busy, submit }) {
-  const [selected, setSelected] = useState(booking.selected_quote_ids);
+  const [selected, setSelected] = useState(() => booking.quotes
+    .filter(quote => quote.available && booking.selected_quote_ids.includes(quote.id)).map(quote => quote.id));
   const [conditions, setConditions] = useState([]);
   const [coupon, setCoupon] = useState('');
   const { data: offers } = useResource(

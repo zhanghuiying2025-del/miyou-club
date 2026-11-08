@@ -1,8 +1,10 @@
 """Verify the React-facing API against the real workflow and simulation stores."""
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -10,7 +12,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from src import company_store, performance, storage
+from src import company_store, performance, storage, supplier_simulation
 from src.models import CouncilDecision, FeasibilityReview, JourneyResponse, ManagedPlan
 from src.web_api import create_app
 from test_compact_planning import checks
@@ -107,7 +109,18 @@ class WebOrderTests(unittest.TestCase):
         item = read(action(customer, path, "confirm_contract", item,
                            options=list(item["booking"]["contract"]["conditions"])))
         unpaid = item
-        item = read(action(customer, path, "pay_deposit", item, coupon_id=ticket))
+        other_tab = TestClient(app, cookies=dict(customer.cookies))
+        ready = Barrier(2, timeout=5)
+
+        def pay_from(tab):
+            ready.wait()
+            return action(tab, path, "pay_deposit", unpaid, coupon_id=ticket)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(pay_from, (customer, other_tab)))
+        self.assertEqual(sum(response.status_code == 200 for response in responses), 1)
+        self.assertEqual(sum(response.status_code in {409, 422} for response in responses), 1)
+        item = read(next(response for response in responses if response.status_code == 200))
         self.assertEqual(item["booking"]["status"], "paid")
         self.assertEqual(item["booking"]["contract"]["total_cents"],
                          unpaid["booking"]["contract"]["total_cents"] - 10000)
@@ -118,6 +131,12 @@ class WebOrderTests(unittest.TestCase):
         self.assertEqual(action(customer, order_path, "authorize_deposit", boss_item).status_code, 401)
         boss_item = read(action(owner, order_path, "authorize_deposit", boss_item))
         self.assertEqual(boss_item["actions"], ["submit_booking"])
+        booking_id = boss_item["booking"]["id"]
+        before = supplier_simulation.load_order(booking_id)
+        self.assertGreater(before[0].supplier_paid_cents, 0)
+        with self.assertRaisesRegex(ValueError, "供方付款前"):
+            supplier_simulation.simulate_change(booking_id, "expire")
+        self.assertEqual(supplier_simulation.load_order(booking_id), before)
         boss_item = read(action(owner, order_path, "submit_booking", boss_item))
         item = read(customer.get(path))
         self.assertEqual(item["booking"]["receipts"], boss_item["booking"]["receipts"])

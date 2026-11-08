@@ -691,6 +691,8 @@ class TravelCase(BaseModel):
     planning_mode: str = "legacy_independent"
     style_template: dict | None = None
     customer_supplements: list[str] = Field(default_factory=list)
+    pending_direction_question: str = ""
+    pending_direction_revision: str = ""
     pending_supplement: str = ""
     supplement_origin: CaseStatus | None = None
     id: str = Field(default_factory=lambda: new_id("case"))

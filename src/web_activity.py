@@ -107,12 +107,12 @@ def apply_tracking_action(case, payload, enqueue, *, owner=False):
             activity_order.advance_activity_order(case)
         else:
             journey.tick_demo(demo, now=demo.last_step_at + journey.SECONDS_PER_TICK * 4 + .01)
-    elif action in {"report_incident", "reopen_incident"}:
+    elif action == "reopen_incident":
+        event = journey.reopen_held_event(demo)
+        if manual:
+            case.audit_log.append(AuditEvent(actor="老板", action="activity_incident_reopened", detail=event.description))
+    elif action == "report_incident":
         kind, note, simulated = payload.incident, payload.note, payload.simulated
-        if action == "reopen_incident":
-            previous = demo.events[-1]
-            demo.status = "paused"
-            kind, note, simulated = previous.kind, previous.description, previous.source == "simulated_event"
         if simulated and manual and kind != "equipment":
             raise ValueError("演示事件仅支持设备故障。")
         if manual:

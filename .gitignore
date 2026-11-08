@@ -4,6 +4,9 @@ __pycache__/
 *.py[cod]
 data/
 .idea/
+.agents/
+.DS_Store
+~$*.docx
 frontend/**/node_modules/
 frontend/**/dist/
 frontend/.pnpm-store/

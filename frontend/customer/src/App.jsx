@@ -10,6 +10,7 @@ const ROBOT = '/assets/miyo-robot.png';
 const HERO_ROBOT = '/assets/miyo-hero-robot.png';
 const icons = { mountain: Mountain, coffee: Coffee, palette: Palette };
 const STEP_NAMES = ['活动名称', '参与团队', '活动地点', '出发时间', '活动预算', '活动偏好'];
+const SHOW_OWNER_DEMO_LINK = import.meta.env.VITE_SHOW_OWNER_DEMO_LINK === 'true';
 
 function navigate(path, replace = false) {
   window.history[replace ? 'replaceState' : 'pushState']({}, '', path);
@@ -48,6 +49,9 @@ function Header({ active, createMode, step, onExit, onStart }) {
       <nav aria-label="主导航" className={menuOpen ? 'nav-open' : ''}>
         {[['/', '首页', 'home'], ['/cases', '案例演示', 'cases'], ['/about', '关于我们', 'about']].map(([to, label, id]) => <Link key={id} to={to} className={`nav-link ${active === id ? 'active' : ''}`} aria-current={active === id ? 'page' : undefined} onClick={() => setMenuOpen(false)}>{label}</Link>)}
         <Link className="nav-link" to="/documents" onClick={() => setMenuOpen(false)}>上传资料</Link><Link className="nav-link" to="/offers" onClick={() => setMenuOpen(false)}>咨询与优惠</Link>
+        {SHOW_OWNER_DEMO_LINK && <a className="nav-link owner-demo-link" href="/boss/">
+          老板端 <small>仅演示阶段开放</small>
+        </a>}
         <Link className="button button-small login-button" to="/activities" onClick={() => setMenuOpen(false)}>我的活动 <ArrowUpRight size={18} /></Link>
       </nav>
     </>}

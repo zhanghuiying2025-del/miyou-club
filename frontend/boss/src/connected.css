@@ -12,6 +12,8 @@
 .connected-tasks li { padding: 10px 0; border-bottom: 1px solid #dddcd0; }
 .connected-tasks a { color: inherit; }
 .connected-tasks p { margin: 6px 0 0; }
+.order-number { overflow-wrap: anywhere; }
+.archive-row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
 .connected-tasks .tag { margin-left: 8px; }
 .connected-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
 .connected-alert { padding: 10px 14px; border-radius: 8px; color: #8e2924; background: #faeae4; }
