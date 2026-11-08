@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowRight, ArrowUpRight, ArrowLeft, X, ChatCircle, Sparkle, CalendarBlank, UsersThree, MapPin, Coins, Check, CheckCircle, Clock, Mountains as Mountain, Coffee, Palette, Briefcase, PencilSimple, List, ShieldCheck } from '@phosphor-icons/react';
-import { blankBrief, goals, stepTitles, examples, money, totalBudget, profileOf, validateStep } from './domain.js';
+import { blankBrief, activityStyles, attractionsFor, stepTitles, examples, money, totalBudget, endDateFromRequirement, durationOf, profileOf, validateStep } from './domain.js';
 import { readDraft, saveDraft } from './storage.js';
-import { customerApi, workspaceUrl } from './api.js';
+import { customerApi, weatherPreviewPath, workspaceUrl } from './api.js';
+import { useResource } from '../../shared/api.js';
 import { ActivityList, ActivityWorkspace } from './Connected.jsx';
 import { Offers, UploadDocuments } from './Features.jsx';
 
@@ -80,6 +81,44 @@ function Home({ onStart }) {
     </div>
   </div>;
 }
+function AttractionPicker({ brief, update }) {
+  const place = brief.destination.trim() || brief.eventCity.trim() || brief.city.trim();
+  if (!place) return null;
+  const options = attractionsFor(place);
+  const selected = brief.attractions || [];
+  const toggle = (item) => update('attractions', selected.includes(item)
+    ? selected.filter(value => value !== item)
+    : [...selected, item]);
+  return <section className="attraction-picker" aria-label={`${place}热门景点偏好`}>
+    <div className="attraction-picker-heading"><div><strong>到了{place}，有想去的地方吗？</strong>
+      <small>下面是当地热门景点，可多选；不选也可以，交给咪游推荐。</small></div>
+      <span>{selected.length} / 5</span></div>
+    <div className="attraction-options">{options.map(item => <Choice key={item} selected={selected.includes(item)}
+      disabled={!selected.includes(item) && selected.length >= 5} onClick={() => toggle(item)}>{item}</Choice>)}</div>
+  </section>;
+}
+function WeatherPreview({ brief }) {
+  const ready = Boolean(brief.date && brief.endDate && (brief.city.trim() || brief.destination.trim()));
+  const path = ready ? weatherPreviewPath({ city: brief.eventCity.trim() || brief.city, destination: brief.destination, date: brief.date, endDate: brief.endDate }) : null;
+  const { data: weather, error, refresh } = useResource(path, customerApi);
+  if (!ready) return <p className="field-hint">选择目的地、出发日期和结束日期后，这里会显示逐日天气。</p>;
+  return <section className="weather-preview" aria-label="目的地天气提示">
+    <div className="weather-preview-heading"><strong>天气提示</strong>
+      <button type="button" className="text-button" onClick={refresh}>刷新</button></div>
+    {error && <p role="alert">{error.message} <button type="button" className="text-button" onClick={refresh}>重试</button></p>}
+    {!weather && !error && <p role="status">正在查询天气…</p>}
+    {weather && <>
+      <p><strong>{weather.condition}</strong> · 全程 {weather.temperature_min_c}°C ~ {weather.temperature_max_c}°C
+        · 最大降水概率 {weather.precipitation_probability ?? 0}% · {weather.location}</p>
+      <div className="weather-days">{(weather.days?.length ? weather.days : [weather]).map(day => <small key={day.date}>
+        <strong>{day.date}</strong> {day.condition} {day.temperature_min_c}°C ~ {day.temperature_max_c}°C
+      </small>)}</div>
+      <small>穿衣建议：{weather.clothing_advice.join('；')}</small>
+      <small>温馨提示：{weather.tips.join('；')}</small>
+      <small>天气预报会变化，进入活动页可随时刷新。</small>
+    </>}
+  </section>;
+}
 function Choice({ selected, children, onClick, className = '', ...props }) {
   return <button type="button" className={`choice ${selected ? 'selected' : ''} ${className}`} aria-pressed={selected} onClick={onClick} {...props}>{children}{selected && <Check size={17} weight="bold" />}</button>;
 }
@@ -88,7 +127,7 @@ function Wizard({ step, brief, update, onExit, onReview }) {
   const valid = validateStep(step, brief);
   useEffect(() => { const timer = setTimeout(() => ref.current?.focus(), 120); return () => clearTimeout(timer); }, [step]);
   const next = () => { if (valid) step === 6 ? onReview() : navigate(`/create/${step + 1}`); };
-  const help = ['一个简单的名字就好。', '人数大致确定就可以。', '有想去的地方，也可以直接告诉我。', '选择暂定的活动日期，后续可以沟通调整。', '我会帮你把预算花在合适的地方。', '选出最在意的，最多三项。'][step - 1];
+  const help = ['一个简单的名字就好。', '人数大致确定就可以。', '告诉我目的地，咪游会结合天气一起考虑。', '填写出发和结束日期，天气会按整个行程查询。', '我会帮你把预算花在合适的地方。', '选择喜欢的活动风格，也可以自己填写。'][step - 1];
   return <div className="wizard-page"><Header createMode step={step} onExit={onExit} />
     <main className="question-shell">
       <div className="question-intro"><img src={ROBOT} alt="正面咪游机器人" /><span>咪游陪你一起安排</span></div>
@@ -97,10 +136,10 @@ function Wizard({ step, brief, update, onExit, onReview }) {
         <div className={`answer-area answer-step-${step}`} key={step}>
           {step === 1 && <><label className="sr-only" htmlFor="event-name">活动名称</label><input ref={ref} id="event-name" className="large-input" placeholder="例如：秋日团建、团队周末出游" maxLength={64} value={brief.name} onChange={(e) => update('name', e.target.value)} autoComplete="off" /><span className="input-count">{brief.name.length} / 64</span><button type="button" className="skip-button" onClick={() => navigate('/create/2')}>还没想好？先跳过</button></>}
           {step === 2 && <><div className="number-field"><label htmlFor="people" className="sr-only">参与人数</label><input ref={ref} id="people" type="number" min="2" max="1000" placeholder="30" value={brief.people} onChange={(e) => update('people', e.target.value)} /><span>位伙伴</span></div><div className="quick-options">{[10, 20, 30, 50, 100].map((count) => <Choice key={count} selected={Number(brief.people) === count} onClick={() => update('people', String(count))}>{count} 人</Choice>)}</div><p className="field-label">这是一支怎样的团队？</p><div className="quick-options team-options">{['团队同事', '新组建团队', '社团伙伴', '朋友家人'].map((team) => <Choice key={team} selected={brief.team === team} onClick={() => update('team', team)}>{team}</Choice>)}</div><p className="field-hint">支持 2–1,000 人，后续可以调整。</p></>}
-          {step === 3 && <><div className="location-fields"><label><span className="field-label">从哪里出发</span><div className="input-with-icon"><MapPin size={22} /><input ref={ref} placeholder="填写出发城市" maxLength={30} value={brief.city} onChange={(e) => update('city', e.target.value)} /></div></label><label><span className="field-label">想去哪里 <small>选填</small></span><div className="input-with-icon"><Mountain size={23} /><input placeholder="让咪游帮我推荐" maxLength={60} value={brief.destination} onChange={(e) => update('destination', e.target.value)} /></div></label></div><div className="quick-options city-options">{['北京', '上海', '杭州', '深圳', '广州', '成都'].map((city) => <Choice key={city} selected={brief.city === city} onClick={() => update('city', city)}>{city}</Choice>)}</div><label className="event-city"><span className="field-label">活动所在城市</span><input className="large-input" placeholder={brief.city || '填写活动城市'} maxLength={30} value={brief.eventCity || ''} onChange={(e) => update('eventCity', e.target.value)} /></label><p className="field-hint">默认按出发城市安排。跨城活动请填写实际活动城市。</p></>}
-          {step === 4 && <><div className="date-field"><label htmlFor="event-date" className="field-label">出发日期</label><input ref={ref} id="event-date" type="date" className="large-input" min={new Date().toLocaleDateString('en-CA')} value={brief.date} onChange={(e) => update('date', e.target.value)} /><label className="checkbox-label"><input type="checkbox" checked={brief.flexible} onChange={(e) => update('flexible', e.target.checked)} /><span>日期可以协商</span></label></div><p className="field-label">想安排多久？</p><div className="quick-options duration-options">{['半天', '1天', '2天1晚', '3天2晚'].map((duration) => <Choice key={duration} selected={brief.duration === duration} onClick={() => update('duration', duration)}>{duration}</Choice>)}</div></>}
+          {step === 3 && <><div className="location-fields"><label><span className="field-label">从哪里出发</span><div className="input-with-icon"><MapPin size={22} /><input ref={ref} placeholder="填写出发城市" maxLength={30} value={brief.city} onChange={(e) => update('city', e.target.value)} /></div></label><label><span className="field-label">想去哪里 <small>选填</small></span><div className="input-with-icon"><Mountain size={23} /><input placeholder="让咪游帮我推荐" maxLength={60} value={brief.destination} onChange={(e) => update('destination', e.target.value)} /></div></label></div><div className="quick-options city-options">{['北京', '上海', '杭州', '深圳', '广州', '成都'].map((city) => <Choice key={city} selected={brief.city === city} onClick={() => update('city', city)}>{city}</Choice>)}</div><label className="event-city"><span className="field-label">活动所在城市</span><input className="large-input" placeholder={brief.city || '填写活动城市'} maxLength={30} value={brief.eventCity} onChange={(e) => update('eventCity', e.target.value)} /></label><p className="field-hint">默认按出发城市安排。跨城活动请填写实际活动城市。</p><AttractionPicker brief={brief} update={update} /></>}
+          {step === 4 && <><div className="date-range-field"><label htmlFor="event-date" className="field-label">出发日期</label><input ref={ref} id="event-date" type="date" className="large-input" min={new Date().toLocaleDateString('en-CA')} value={brief.date} onChange={(e) => update('date', e.target.value)} /><label htmlFor="end-date" className="field-label">结束日期</label><input id="end-date" type="date" className="large-input" min={brief.date || new Date().toLocaleDateString('en-CA')} value={brief.endDate} onChange={(e) => update('endDate', e.target.value)} /><label className="checkbox-label"><input type="checkbox" checked={brief.flexible} onChange={(e) => update('flexible', e.target.checked)} /><span>日期可以协商</span></label></div><WeatherPreview brief={brief} /></>}
           {step === 5 && <><div className="number-field budget-field"><span className="currency">¥</span><label htmlFor="budget" className="sr-only">人均预算</label><input ref={ref} id="budget" type="number" min="50" max="100000" placeholder="500" value={brief.budget} onChange={(e) => update('budget', e.target.value)} /><span>/ 人</span></div><div className="quick-options">{[200, 500, 800, 1500].map((value) => <Choice key={value} selected={Number(brief.budget) === value} onClick={() => update('budget', String(value))}>¥{money(value)}</Choice>)}</div><div className="budget-note"><Coins size={20} /><span>{brief.budget ? `按 ${brief.people || 0} 人计算，总预算约 ` : '填写预算后，为你计算团队总预算'}{brief.budget && <strong>¥{money(totalBudget(brief))}</strong>}</span></div><p className="field-hint">含活动、餐饮、交通；住宿视活动时长安排。人均最低 ¥50。</p></>}
-          {step === 6 && <><div className="goal-options">{goals.map((goal) => <Choice key={goal} selected={brief.goals.includes(goal)} disabled={!brief.goals.includes(goal) && brief.goals.length >= 3} onClick={() => update('goals', brief.goals.includes(goal) ? brief.goals.filter((item) => item !== goal) : [...brief.goals, goal])}>{goal}</Choice>)}</div><label className="notes-label" htmlFor="notes">还有什么想告诉咪游？ <span>选填</span></label><textarea id="notes" maxLength={300} value={brief.notes} onChange={(e) => update('notes', e.target.value)} placeholder="例如：不要太累、需要素食、有伙伴需要无障碍通行…" rows={3} /><span className="input-count">{brief.notes.length} / 300</span></>}
+          {step === 6 && <><div className="goal-options style-options">{activityStyles.map((style) => <Choice key={style} selected={brief.goals.includes(style)} disabled={!brief.goals.includes(style) && brief.goals.length >= 3} onClick={() => update('goals', brief.goals.includes(style) ? brief.goals.filter((item) => item !== style) : [...brief.goals, style])}>{style}</Choice>)}<Choice selected={brief.showCustomStyle} onClick={() => update('showCustomStyle', !brief.showCustomStyle)}>其他</Choice></div>{brief.showCustomStyle && <label className="custom-style"><span className="field-label">自定义风格</span><input className="large-input" maxLength={30} value={brief.customStyle} onChange={(e) => update('customStyle', e.target.value)} placeholder="例如：复古怀旧、科技探索、轻松治愈" /></label>}<label className="notes-label" htmlFor="notes">还有什么想告诉咪游？ <span>选填</span></label><textarea id="notes" maxLength={300} value={brief.notes} onChange={(e) => update('notes', e.target.value)} placeholder="例如：不要太累、需要素食、有伙伴需要无障碍通行…" rows={3} /><span className="input-count">{brief.notes.length} / 300</span></>}
         </div>
         <div className="question-actions"><button type="submit" className="button continue-button" disabled={!valid}>{step === 6 ? '看看我的活动画像' : '下一步'} <ArrowRight size={23} /></button><span className="wizard-footnote">{step === 1 ? '约 2 分钟，开启一次好活动' : '你的回答会自动保存'}</span></div>
       </form>
@@ -110,11 +149,10 @@ function Wizard({ step, brief, update, onExit, onReview }) {
 }
 function Review({ brief, onExit, onGenerate, onFiles, busy, error }) {
   const p = profileOf(brief);
-  const eventCity = brief.eventCity.trim() || brief.city;
   const fields = [
-    ['活动名称', brief.name.trim() || '还没有名字的好活动', 1, PencilSimple], ['参与团队', `${brief.people} 人 · ${brief.team}`, 2, UsersThree], ['活动地点', `${brief.city}出发 · ${eventCity} · ${p.place}`, 3, MapPin], ['时间安排', `${brief.flexible ? brief.date + '（可协商）' : brief.date} · ${brief.duration}`, 4, CalendarBlank], ['预算范围', `¥${money(brief.budget)} / 人 · 共 ¥${money(totalBudget(brief))}`, 5, Coins], ['活动偏好', p.focus, 6, Sparkle],
+    ['活动名称', brief.name.trim() || '还没有名字的好活动', 1, PencilSimple], ['参与团队', `${brief.people} 人 · ${brief.team}`, 2, UsersThree], ['活动地点', `${brief.city}出发 · ${brief.eventCity.trim() || brief.city} · ${p.place}`, 3, MapPin], ['时间安排', `${brief.date} 至 ${brief.endDate}${brief.flexible ? '（可协商）' : ''} · ${durationOf(brief)}`, 4, CalendarBlank], ['预算范围', `¥${money(brief.budget)} / 人 · 共 ¥${money(totalBudget(brief))}`, 5, Coins], ['活动偏好', p.focus, 6, Sparkle],
   ];
-  return <div className="wizard-page review-page"><Header createMode step={6} onExit={onExit} /><main className="review-shell"><img className="review-robot" src={ROBOT} alt="正面咪游机器人" /><p className="eyebrow">很高兴，更了解你们了</p><h1 className="display-heading">这次相聚，我了解了。</h1><p className="section-description">确认一下，接下来交给我们的 AI 团队。</p><div className="profile-review">{fields.map(([label, value, step, Icon]) => <button key={label} className="review-field" onClick={() => navigate(`/create/${step}`)}><Icon size={23} /><span><small>{label}</small><strong>{value}</strong></span><PencilSimple size={17} className="review-edit" /></button>)}</div>{brief.notes && <p className="special-note"><strong>特别记下了：</strong>{brief.notes}</p>}<label className="connected-panel">参考附件（可选，最多 3 份）<input type="file" accept=".pdf,.docx,image/jpeg,image/png,image/gif,image/webp" multiple onChange={event => onFiles(Array.from(event.target.files))} /></label><button className="button generate-button" disabled={busy} onClick={onGenerate}>{busy ? "正在提交…" : "让 AI 团队开始策划"} <Sparkle size={23} /></button><p className="wizard-footnote">查看团队给出的方案，再确认安排。</p>{error && <p className="connected-error" role="alert">{error}</p>}</main><div className="wizard-bottom"><Link className="text-button" to="/create/6"><ArrowLeft size={19} />返回修改</Link><span>需求确认</span></div></div>;
+  return <div className="wizard-page review-page"><Header createMode step={6} onExit={onExit} /><main className="review-shell"><img className="review-robot" src={ROBOT} alt="正面咪游机器人" /><p className="eyebrow">很高兴，更了解你们了</p><h1 className="display-heading">这次相聚，我了解了。</h1><p className="section-description">确认一下，接下来交给我们的 AI 团队。</p><div className="profile-review">{fields.map(([label, value, step, Icon]) => <button key={label} className="review-field" onClick={() => navigate(`/create/${step}`)}><Icon size={23} /><span><small>{label}</small><strong>{value}</strong></span><PencilSimple size={17} className="review-edit" /></button>)}</div>{brief.attractions?.length > 0 && <p className="special-note"><strong>偏好景点：</strong>{brief.attractions.join('、')}</p>}{brief.notes && <p className="special-note"><strong>特别记下了：</strong>{brief.notes}</p>}<label className="connected-panel">参考附件（可选，最多 3 份）<input type="file" accept=".pdf,.docx,image/jpeg,image/png,image/gif,image/webp" multiple onChange={event => onFiles(Array.from(event.target.files))} /></label><button className="button generate-button" disabled={busy} onClick={onGenerate}>{busy ? "正在提交…" : "让 AI 团队开始策划"} <Sparkle size={23} /></button><p className="wizard-footnote">查看团队给出的方案，再确认安排。</p>{error && <p className="connected-error" role="alert">{error}</p>}</main><div className="wizard-bottom"><Link className="text-button" to="/create/6"><ArrowLeft size={19} />返回修改</Link><span>需求确认</span></div></div>;
 }
 function Cases({ onStart, onUseCase }) {
   return <div className="inner-page"><Header active="cases" onStart={onStart} /><main className="content-shell cases-shell"><p className="eyebrow">相聚的灵感，从这里开始</p><div className="section-title-row"><h1 className="display-heading">好活动，可以有很多种。</h1><span className="quiet-label">以下均为演示案例</span></div><p className="section-description">选一个喜欢的方向，把它变成你们自己的故事。</p><div className="case-list">{examples.map((item) => { const Icon = icons[item.icon]; return <article key={item.id} className={`case-row case-${item.id}`}><div className="case-number">{item.number}<Icon size={58} weight="thin" /></div><div className="case-content"><span className="small-tag">{item.tag}</span><h2>{item.name}</h2><p>{item.description}</p><div className="case-meta"><span><MapPin />{item.city}</span><span><UsersThree />{item.people}人</span><span><Clock />{item.duration}</span><span>人均 ¥{money(item.budget)}</span></div></div><button className="round-link" aria-label={`以${item.label}为灵感创建活动`} onClick={() => onUseCase(item)}><ArrowUpRight size={28} /></button><button className="case-use-link text-button" onClick={() => onUseCase(item)}>以此为灵感 <ArrowRight size={17} /></button></article>; })}</div><div className="bottom-callout"><span>还没有灵感？让咪游和你一起想。</span><button className="text-button green-text" onClick={onStart}>开始聊聊 <ArrowRight size={22} /></button></div></main><Footer /></div>;
@@ -148,7 +186,13 @@ function readLandingAttribution() {
 export function App() {
   const route = useRoute();
   const [draft, setDraft] = useState(readDraft);
-  const [brief, setBrief] = useState(() => ({ ...blankBrief(), ...draft?.brief }));
+  const [brief, setBrief] = useState(() => {
+    const saved = { ...blankBrief(), ...draft?.brief };
+    if (!saved.endDate) {
+      saved.endDate = endDateFromRequirement({ event_date: saved.date, duration: saved.duration });
+    }
+    return saved;
+  });
   const [requestId, setRequestId] = useState(() => draft?.requestId || crypto.randomUUID());
   const landingAttribution = useRef(readLandingAttribution());
   const draftAttribution = useRef(draft?.attribution ?? null);
@@ -188,8 +232,8 @@ export function App() {
 
   function fresh(example) {
     const next = example ? { ...blankBrief(), name: example.label, city: example.city,
-      destination: example.destination, people: String(example.people), budget: String(example.budget),
-      duration: example.duration, goals: example.goals } : blankBrief();
+      destination: example.destination, eventCity: example.city, people: String(example.people), budget: String(example.budget),
+      goals: example.goals } : blankBrief();
     const id = crypto.randomUUID();
     setBrief(next);
     setFiles([]);
@@ -206,6 +250,9 @@ export function App() {
 
   function update(field, value) {
     const next = { ...brief, [field]: value };
+    if (field === 'date' && next.endDate && next.endDate < value) next.endDate = value;
+    if (field === 'city' || field === 'eventCity' || field === 'destination') next.attractions = [];
+    if (field === 'showCustomStyle' && !value) next.customStyle = '';
     setBrief(next);
     persist(next, step || 1);
   }
@@ -221,9 +268,17 @@ export function App() {
     setSubmitting(true);
     setSubmitError('');
     try {
-      const payload = { request_id: requestId, utm_campaign: draftAttribution.current?.utm_campaign,
-        utm_source: draftAttribution.current?.utm_source, brief: { ...brief, name: brief.name.trim() || '未命名团建',
-        event_city: brief.eventCity.trim() || brief.city.trim(), people: Number(brief.people), budget: Number(brief.budget) } };
+      let weather = null;
+      try {
+        weather = await customerApi(weatherPreviewPath({ city: brief.eventCity.trim() || brief.city, destination: brief.destination, date: brief.date, endDate: brief.endDate }));
+      } catch (weatherFailure) {
+        // Planning may continue without a forecast; the workspace can refresh later.
+      }
+      const payload = {
+        request_id: requestId, utm_campaign: draftAttribution.current?.utm_campaign,
+        utm_source: draftAttribution.current?.utm_source,
+        brief: { ...brief, name: brief.name.trim() || '未命名团建',
+        event_city: brief.eventCity.trim() || brief.city.trim(), end_date: brief.endDate, weather, goals: [...brief.goals, brief.customStyle.trim()].filter(Boolean), people: Number(brief.people), budget: Number(brief.budget) } };
       if (files.length > 3) throw new Error('最多上传 3 份参考附件。');
       let body = payload;
       if (files.length) {

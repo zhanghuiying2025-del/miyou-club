@@ -116,6 +116,42 @@ class SupplierOperationsTests(unittest.TestCase):
         self.assertEqual(summary["finance"]["cash_cents"],5100000)
         self.assertEqual(len(summary["ledger"]),4)
         self.assertEqual(summary["service_income_cents"],500000)
+        self.assertEqual(summary["advance_liability_cents"],0)
+        self.assertEqual(summary["recognized_revenue_cents"],15500000)
+        self.assertEqual(summary["recognized_supplier_cost_cents"],15000000)
+        self.assertEqual(summary["realized_order_profit_cents"],500000)
+        self.assertEqual(summary["supplier_payable_cents"],0)
+        self.assertEqual(summary["project_finance"][0]["project_id"],order.id)
+        self.assertTrue(all(row["project_id"] == order.id for row in summary["ledger"]))
+
+    def test_customer_deposit_is_project_advance_not_income_or_profit(self):
+        order=self.paid(self.create(case_id="case-finance-source"))
+        summary=ops.operating_summary()
+        self.assertEqual(summary["advance_liability_cents"],order.customer_paid_cents)
+        self.assertEqual(summary["recognized_revenue_cents"],0)
+        self.assertEqual(summary["realized_order_profit_cents"],0)
+        project=summary["project_finance"][0]
+        self.assertEqual(project["project_id"],"case-finance-source")
+        self.assertEqual(project["status_label"],"履约中，客户付款仍为预收款")
+        deposit=next(row for row in summary["ledger"] if row["flow_type"]=="客户预付款")
+        self.assertEqual(deposit["project_id"],"case-finance-source")
+        self.assertEqual(deposit["counterparty"],"客户 demo-150")
+        self.assertEqual(deposit["recognition"],"客户预收款，尚未确认收入")
+
+    def test_delivery_recognizes_revenue_and_accrues_unpaid_supplier_cost(self):
+        order=self.paid(self.create(case_id="case-delivered-finance"))
+        order=business.pay_supplier_deposit(order.id,"owner")
+        business.fulfill_bookings(order.id)
+        order=business.finish_service(order.id)
+        summary=ops.operating_summary()
+        project=summary["project_finance"][0]
+        self.assertEqual(order.status,"delivered")
+        self.assertEqual(project["advance_liability_cents"],0)
+        self.assertEqual(project["recognized_revenue_cents"],15500000)
+        self.assertEqual(project["recognized_supplier_cost_cents"],15000000)
+        self.assertEqual(project["supplier_payable_cents"],10500000)
+        self.assertEqual(project["realized_order_profit_cents"],500000)
+        self.assertEqual(project["status_label"],"已交付并确认收入，供方待结清")
 
     def test_expired_quote_prevents_payment_and_preserves_state(self):
         order=self.agreed(self.choose(self.create()))

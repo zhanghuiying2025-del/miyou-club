@@ -46,6 +46,7 @@ from src.models import (
     BriefCreativeRound,
     ProposalBrief,
     TaskHandoff,
+    WeatherForecast,
 )
 from src.result_cache import cache_key, get_result, store_result, policy_key
 from src.multimodal import (
@@ -63,6 +64,22 @@ from src.presentation import task_message
 from src import history_search
 from src.runtime import planning_paused
 from src.style_planning import STYLE_GUIDES, matching_style_template
+
+
+WEATHER_PLAN_INSTRUCTIONS = (
+    "天气预报只代表查询时的预测，不虚构已落实的天气保障。根据天气调整活动强度、时段、交通和室内备选；"
+    "在customer_notice中分别写出“穿衣建议：”和“温馨提示：”，文字要具体、可执行。"
+)
+
+
+def weather_plan_context(case: TravelCase) -> str:
+    req = case.requirements
+    if not req or not req.weather:
+        return ""
+    return (
+        "\n最新天气预报："
+        f"{req.weather.model_dump_json()}\n{WEATHER_PLAN_INSTRUCTIONS}"
+    )
 
 
 class WorkflowError(RuntimeError):
@@ -274,6 +291,7 @@ class TravelAgencyWorkflow:
                 f"客户需求：{case.requirements.model_dump_json() if case.requirements else case.customer_request}\n"
                 f"当前草案：{case.council_decision.model_dump_json()}\n"
                 f"客户调整：{json.dumps(changes, ensure_ascii=False)}\n"
+                f"{weather_plan_context(case)}\n"
                 f"此前客户修改记录：{json.dumps(case.draft_change_requests, ensure_ascii=False)}\n"
                 f"{CONCERN_INSTRUCTIONS}\n"
                 "修改草案并明确回应调整；不得自行覆盖硬性条件，冲突时提出客户决策。",
@@ -692,6 +710,7 @@ discussion_message 是你在团队讨论区的一句公开发言，最多120字�
         brief = await self._call(case, "planner",
             f"活动方向：{style}。{guide}\n"
             f"本单需求：{case.requirements.model_dump_json()}\n"
+            f"{weather_plan_context(case)}\n"
             f"可复用方法：{json.dumps(methods, ensure_ascii=False)}\n"
             f"满意方案参考：{json.dumps(examples, ensure_ascii=False)}\n"
             f"附件信息：{json.dumps([x.model_dump() for x in case.attachment_insights], ensure_ascii=False)}\n"
@@ -916,6 +935,7 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
 客户最终确认的风格偏好和公司反馈判断：
 {case.style_feedback.model_dump_json(indent=2) if case.style_feedback else "无"}
 {case.feedback_assessment.model_dump_json(indent=2) if case.feedback_assessment else "无"}
+{weather_plan_context(case)}
 
 本案正在生效的约束：
 {json.dumps(case.applied_constraints, ensure_ascii=False, indent=2)}
@@ -944,17 +964,21 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
         compact = case.planning_protocol == "compact_v1"
         if compact:
             case.cache_policy_fingerprint = policy_key(self.policy)
-            self._load_learning(case)
-            self._load_history(case)
+            # Reuse a previously generated check before enriching this call with
+            # optional learning/history context; enrichment must not invalidate
+            # a check that was created against the same case inputs.
             from src.compact_planning import cached_reviews
             saved = cached_reviews(case)
             if saved is not None:
                 self._log(case, "程序", "checks_reused", "方案与需求未变，复用整合时检查并运行程序规则，无额外模型调用")
                 return saved
+            self._load_learning(case)
+            self._load_history(case)
         self._progress("履约执行正在复核修改或未解决的问题……" if compact else "项目经理正在一次完成运营与风险两项检查……")
         prompt = (
             f"客户需求：{case.requirements.model_dump_json() if case.requirements else case.customer_request}\n"
             f"当前方案：{case.council_decision.model_dump_json() if case.council_decision else '无'}\n"
+            f"{weather_plan_context(case)}\n"
             "本轮只核查当前方案，依照阶段契约报告具体问题和完成条件。"
         )
         if compact:
@@ -1050,6 +1074,7 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
 
 审核意见：
 {json.dumps([review.model_dump() for review in case.reviews], ensure_ascii=False, indent=2)}
+{weather_plan_context(case)}
 
 在不擅自改变客户硬性需求的前提下修订方案，逐条回应可自动修复的问题。
 """,
@@ -1333,6 +1358,51 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
             titles = "、".join(lesson.title for lesson in lessons)
             self._log(case, "反馈改进模块", "scenario_learned", f"已学习情景：{titles}")
 
+    async def replan_for_weather(
+        self,
+        case: TravelCase,
+        forecast: WeatherForecast,
+        reason: str = "",
+    ) -> TravelCase:
+        if not case.requirements or not case.council_decision:
+            raise InvalidStateError("当前没有可根据天气调整的活动方案")
+        if case.journey_demo:
+            raise WorkflowError("团建现场演示已开始，请按现场安全安排处理。")
+        case.requirements.weather = forecast
+        reason = reason.strip() or "用户希望根据最新天气更换当天方案"
+        self._progress("正在根据最新天气重新安排当天方案……")
+        revised = await self._call(
+            case,
+            "planner",
+            f"""
+客户需求：{case.requirements.model_dump_json(indent=2)}
+当前方案：{case.council_decision.model_dump_json(indent=2)}
+用户因天气提出的调整：{reason}
+本案继续生效的硬性条件：{json.dumps(case.applied_constraints, ensure_ascii=False)}
+{weather_plan_context(case)}
+
+这是一版“因天气调整当天方案”的完整替代方案。保持人数、总预算、活动目标和已确认硬性条件；
+优先采用时段平移、缩短户外环节、增加室内备选或更换同类活动。若已有预订，只能提出待人工核对的调整，
+不得宣称已取消或已改订。输出完整方案，明确写出穿衣建议和温馨提示。
+{CONCERN_INSTRUCTIONS}
+""",
+            CouncilDecision,
+        )
+        case.council_decision = revised
+        case.plan_version += 1
+        case.applied_constraints.append(f"天气调整：{reason}")
+        case.reviews = []
+        case.approval = None
+        case.plan_feedback_options = None
+        case.plan_acceptance_feedback = None
+        case.manager_checks = None
+        case.manager_check_fingerprint = ""
+        case.final_recheck_required = True
+        case.status = CaseStatus.REVIEWING
+        self._publish(case, "项目经理", "天气调整方案", revised.summary)
+        self._log(case, "customer", "weather_replan_requested", reason)
+        return await self.advance(case)
+
     async def rework_rejected_plan(self, case: TravelCase) -> TravelCase:
         if case.status != CaseStatus.NEEDS_REWORK or case.plan_acceptance_feedback is None:
             raise InvalidStateError("当前没有等待返工的客户拒绝方案")
@@ -1354,6 +1424,7 @@ organization_constraints只写针对问题的检查建议，按相似条件复�
 
 被客户拒绝的方案：
 {case.council_decision.model_dump_json(indent=2) if case.council_decision else "无"}
+{weather_plan_context(case)}
 
 客户拒绝原因：
 {rejected.model_dump_json(indent=2)}

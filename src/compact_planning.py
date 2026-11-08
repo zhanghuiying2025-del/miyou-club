@@ -13,6 +13,11 @@ def digest(value):
         separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def weather_plan_context(workflow, case):
+    from src.workflow import weather_plan_context as build_context
+    return build_context(case)
+
+
 def proposal_payload(case):
     return json.dumps([p.model_dump(exclude_defaults=True) for p in case.creative_opinions], ensure_ascii=False)
 
@@ -78,6 +83,7 @@ async def run_feasibility(workflow, case):
             f"客户选择：{case.style_feedback.model_dump_json() if case.style_feedback else case.lead_agent}\n"
             f"当前有效约束：{json.dumps(case.applied_constraints,ensure_ascii=False)}\n"
             f"当前策划提案：{proposal_payload(case)}\n"
+            f"{weather_plan_context(workflow, case)}\n"
             "围绕客户选择的方向检查时间、资源依赖、参与限制和预算可行性；其他提案仅作备选。"
             "只报告有证据的具体问题，每项给出evidence、release_condition和至多两个替代。"
             "报价、容量、场地未预订在此阶段通常是pending_resources，不自动升级为高风险或要求老板审批。"
@@ -104,6 +110,7 @@ async def run_deliberation(workflow, case):
         f"已生效约束：{json.dumps(case.applied_constraints,ensure_ascii=False)}\n"
         f"策划提案：{proposal_payload(case)}\n"
         f"履约实际检查：{case.feasibility_review.model_dump_json()}\n"
+        f"{weather_plan_context(workflow, case)}\n"
         "没有策划互评，不得编造同事对话或共识。贡献只使用activity映射到原提案活动下标；不用compromise。"
         "已有客户选择和已答复的信息不要再问。预算细分、餐饮口味、备选活动等普通取舍在现有限制内先做可撤销的选择，"
         "并在plan.customer_notice标明方案假设；待报价和档期写plan.pending_resources。"

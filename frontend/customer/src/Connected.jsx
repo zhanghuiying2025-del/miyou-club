@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { money, useResource } from '../../shared/api.js';
-import { activityPath, customerApi, planUrl, workspaceUrl } from './api.js';
+import { activityPath, customerApi, planUrl, weatherPreviewPath, workspaceUrl } from './api.js';
+import { endDateFromRequirement } from './domain.js';
 import { DeliveryFeedback, Documents } from './Features.jsx';
 
 const stages = {
@@ -25,6 +26,7 @@ const buttonLabels = {
   confirm_contract: '确认预订条款', pay_deposit: '支付模拟预付款',
   confirm_schedule: '确认更新后的行程', confirm_delivery: '确认交付并支付模拟尾款',
   supplement: '提交补充需求', start_travel_demo: '开始团建现场演示',
+  weather_replan: '按最新天气调整当天方案',
 };
 
 export function ActivityList({ draft, onStart }) {
@@ -94,7 +96,9 @@ export function ActivityWorkspace({ id, planId, planList }) {
   const allowed = new Set(activity.actions);
   const requirements = activity.requirements;
   const activityFacts = requirements ? [
-    requirements.city, requirements.event_date,
+    requirements.destination ? `${requirements.city || ''} · ${requirements.destination}` : requirements.city,
+    requirements.end_date && requirements.end_date !== requirements.event_date
+      ? `${requirements.event_date} 至 ${requirements.end_date}` : requirements.event_date,
     requirements.participant_count == null ? '' : `${requirements.participant_count} 人`,
     requirements.duration,
     requirements.budget_yuan == null ? '' : `总预算 ${money(requirements.budget_yuan * 100)}`,
@@ -123,6 +127,7 @@ export function ActivityWorkspace({ id, planId, planList }) {
       </a>
     </div>}
     {plan && <Plan plan={plan} />}
+    {requirements?.event_date && <WeatherPanel requirements={requirements} busy={busy} canReplan={allowed.has('weather_replan')} submit={submit} />}
     {!planId && <div className="connected-grid">
       {activity.plans.map(item => <article className="connected-panel" key={item.id}>
         <h2>{item.title}</h2><p>{item.summary}</p>
@@ -172,6 +177,52 @@ export function ActivityWorkspace({ id, planId, planList }) {
       </li>)}</ul>
     </section>}
   </main>;
+}
+
+function WeatherPanel({ requirements, busy, canReplan, submit }) {
+  const endDate = endDateFromRequirement(requirements);
+  const path = weatherPreviewPath({
+    city: requirements?.city || '',
+    destination: requirements?.destination || '',
+    date: requirements?.event_date || '',
+    endDate,
+  });
+  const { data: weather, error, refresh } = useResource(path, customerApi);
+  const [reason, setReason] = useState('');
+  return <section className="connected-panel weather-card" aria-label="活动天气">
+    <div className="weather-card-heading"><div><p className="eyebrow">出发前记得再看一眼</p><h2>目的地天气</h2></div>
+      <button type="button" className="button button-outline weather-refresh" disabled={!weather && !error} onClick={refresh}>刷新天气</button></div>
+    {error && <p className="connected-error" role="alert">{error.message} <button type="button" className="text-button" onClick={refresh}>重试</button></p>}
+    {!weather && !error && <p role="status">正在读取最新天气…</p>}
+    {weather && <>
+      <div className="weather-days">{(weather.days?.length ? weather.days : [weather]).map(day => <div key={day.date}>
+        <strong>{day.date}</strong><span>{day.condition}</span>
+        <span>{day.temperature_min_c}°C ~ {day.temperature_max_c}°C</span>
+        <span>降水 {day.precipitation_probability ?? 0}%</span>
+      </div>)}</div>
+      <div className="weather-summary">
+        <strong>{weather.condition}</strong>
+        <span>{weather.temperature_min_c}°C ~ {weather.temperature_max_c}°C</span>
+        <span>降水 {weather.precipitation_probability ?? 0}%</span>
+        <span>最大风速 {weather.wind_speed_max ?? 0} m/s</span>
+        <span>{weather.location}</span>
+      </div>
+      <dl className="weather-advice">
+        <div><dt>穿衣建议</dt><dd>{weather.clothing_advice.join('；')}</dd></div>
+        <div><dt>温馨提示</dt><dd>{weather.tips.join('；')}</dd></div>
+      </dl>
+      <p className="weather-source">{weather.event_date}{weather.end_date && weather.end_date !== weather.event_date ? ` 至 ${weather.end_date}` : ''} · 更新于 {weather.fetched_at.replace('T', ' ')} · {weather.source}。天气预报可能变化，请以临近出发时为准。</p>
+      {canReplan && <details className="weather-replan">
+        <summary>根据最新天气更新当前草案或方案</summary>
+        <p>AI 会读取出发日至结束日的完整预报，重新安排时段、室内备选、穿衣与安全提示。</p>
+        <label>想怎么调整<textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)}
+          placeholder="可填写具体要求；不填则按完整天气预报自动更新" /></label>
+        <button type="button" className="button" disabled={busy} onClick={() => submit('weather_replan', { note: reason, weather })}>
+          更新完整天气建议与当前方案
+        </button>
+      </details>}
+    </>}
+  </section>;
 }
 
 function Plan({ plan }) {

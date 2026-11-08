@@ -1,5 +1,5 @@
 """Single-process local entry point for the customer and owner React apps."""
-from datetime import date
+from datetime import date, timedelta
 from hashlib import sha256
 import os
 from pathlib import Path
@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, UUID4, ValidationError
 from pypdf.errors import PyPdfError
 
-from src import document_intake, operations, storage, supplier_simulation as suppliers
+from src import document_intake, operations, storage, supplier_simulation as suppliers, weather
 from src.activity_review import read_activity_documents, report_markdown
 from src import web_flow as flow
 from src.company_store import SimulationConflict
@@ -37,6 +37,17 @@ FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
 
 class OwnerLogin(BaseModel):
     password: str = Field(max_length=512)
+
+
+def resolved_event_end_date(req) -> date:
+    start = date.fromisoformat(req.event_date)
+    if req.end_date:
+        return date.fromisoformat(req.end_date)
+    # Older activities were created before end_date existed; recover the range
+    # from the chosen duration so their weather card is not reduced to one day.
+    match = re.search(r"(\d+)天", req.duration or "")
+    days = int(match.group(1)) if match else 1
+    return start + timedelta(days=max(days - 1, 0))
 
 
 class MarketingAction(BaseModel):
@@ -202,6 +213,43 @@ def create_app(frontend=FRONTEND):
             operations.register_lead(key, payload.interest, payload.campaign_id)
         return marketing_view(key)
 
+    @app.get("/api/customer/weather")
+    def weather_preview(
+        destination: str = "",
+        city: str = "",
+        start_date: date | None = None,
+        end_date: date | None = None,
+        event_date: date | None = None,
+        customer=Depends(current_customer),
+    ):
+        start_date = start_date or event_date
+        if start_date is None or not (destination.strip() or city.strip()):
+            raise HTTPException(422, "请选择出发日期、结束日期和目的地后查看天气。")
+        try:
+            return weather.fetch_weather(destination, start_date, city or None, end_date or start_date)
+        except weather.WeatherError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    @app.get("/api/customer/activities/{case_id}/weather")
+    def refresh_activity_weather(case_id: str, customer=Depends(current_customer)):
+        case = owned_case(case_id, customer)
+        req = case.requirements
+        if not req or not req.event_date:
+            raise HTTPException(422, "该活动还没有可查询的日期和目的地。")
+        try:
+            forecast = weather.fetch_weather(
+                req.destination or req.city or "",
+                date.fromisoformat(req.event_date),
+                req.city,
+                resolved_event_end_date(req),
+            )
+        except (ValueError, weather.WeatherError) as exc:
+            raise HTTPException(503, str(exc)) from exc
+        req.end_date = forecast.end_date or resolved_event_end_date(req).isoformat()
+        req.weather = forecast
+        storage.save_case_to_disk(case)
+        return forecast
+
     @app.get("/api/customer/activities/{case_id}")
     def activity(case_id: str, customer=Depends(current_customer)):
         return flow.activity_view(owned_case(case_id, customer))
@@ -258,6 +306,7 @@ def create_app(frontend=FRONTEND):
             "plans": flow.plan_views(case) if case else [],
             "approval": case.approval.model_dump(mode="json") if case and case.approval else None,
             "plan_feedback": case.plan_acceptance_feedback.model_dump(mode="json") if case and case.plan_acceptance_feedback else None,
+            "learning_usage": flow.learning_view(case) if case else [],
             "delivery_feedback": case.delivery_feedback.model_dump(mode="json") if case and case.delivery_feedback else None,
             "attachments": [item.model_dump(mode="json") for item in case.attachment_insights] if case else [],
             **(document_view(case) if case else {}),

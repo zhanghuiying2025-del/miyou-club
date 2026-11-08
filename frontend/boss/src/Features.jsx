@@ -265,11 +265,38 @@ export function Operations({ activeTab, campaignId, marketing }) {
     {tab === 'campaigns' && <MarketingCampaigns campaignId={campaignId} marketing={marketing} />}
     {!data && <p role={error ? 'alert' : 'status'}>{error?.message || '正在读取公司记录…'}</p>}
     {message && <p role="status">{message}</p>}
-    {data && tab === 'ledger' && <><p>咨询 {data.summary.leads} 个 · 已付 {data.summary.paid_orders} 笔 · 已结清 {data.summary.completed_orders} 笔</p>
-      <p>模拟余额 {money(data.summary.finance.cash_cents)} · 已确认净服务费 {money(data.summary.service_income_cents)}</p>
+    {data && tab === 'ledger' && <>
+      <p>咨询 {data.summary.leads} 个 · 已收款订单 {data.summary.paid_orders} 笔 · 已完成并确认收入 {data.summary.completed_orders} 笔</p>
+      <p className="note">现金余额包含客户预付款，不等于收入或利润。客户预付款在项目完成前作为预收款及履约义务单独展示。</p>
+      <div className="fact-grid finance-facts">
+        <div className="fact"><span>现金余额（含预收款）</span><strong>{money(data.summary.finance.cash_cents)}</strong></div>
+        <div className="fact"><span>客户预收款（尚未确认收入）</span><strong>{money(data.summary.advance_liability_cents)}</strong></div>
+        <div className="fact"><span>待付供方款</span><strong>{money(data.summary.supplier_payable_cents)}</strong></div>
+        <div className="fact"><span>已确认合同收入</span><strong>{money(data.summary.recognized_revenue_cents)}</strong></div>
+        <div className="fact"><span>已确认供方成本</span><strong>{money(data.summary.recognized_supplier_cost_cents)}</strong></div>
+        <div className="fact"><span>已实现订单毛利</span><strong>{money(data.summary.realized_order_profit_cents)}</strong></div>
+        <div className="fact"><span>公司累计净结果（扣运营支出）</span><strong>{money(data.summary.net_profit_after_operations_cents)}</strong></div>
+      </div>
+      <h2 className="section-title">按项目核对财务状态</h2>
+      {!data.summary.project_finance.length && <p className="muted">当前没有发生资金流动的项目。</p>}
+      {data.summary.project_finance.length > 0 && <div className="table-scroll"><table><thead><tr>
+        <th>项目与编号</th><th>财务状态</th><th>客户累计付款</th><th>供方累计付款</th><th>客户预收款</th><th>待付供方款</th><th>已确认收入</th><th>已实现毛利</th>
+      </tr></thead><tbody>{data.summary.project_finance.map(row => <tr key={row.supplier_order_id}>
+        <td><strong>{row.project_title}</strong><span className="table-sub">项目 {row.project_id} · 订单 {row.supplier_order_id}</span></td>
+        <td>{row.status_label}</td><td>{money(row.customer_paid_cents)}</td><td>{money(row.supplier_paid_cents)}</td>
+        <td>{money(row.advance_liability_cents)}</td><td>{money(row.supplier_payable_cents)}</td><td>{money(row.recognized_revenue_cents)}</td><td>{money(row.realized_order_profit_cents)}</td>
+      </tr>)}</tbody></table></div>}
+      <h2 className="section-title">逐笔资金流水</h2>
+      {!data.summary.ledger.length && <p className="muted">当前没有资金流水。</p>}
+      {data.summary.ledger.length > 0 && <div className="table-scroll"><table><thead><tr>
+        <th>项目与编号</th><th>资金性质</th><th>资金来源 / 收款对象</th><th>方向与金额</th><th>会计状态</th>
+      </tr></thead><tbody>{data.summary.ledger.map(row => <tr key={row.id}>
+        <td><strong>{row.project_title}</strong><span className="table-sub">{row.project_id}</span></td>
+        <td>{row.flow_type}<span className="table-sub">{row.purpose}</span></td><td>{row.counterparty}</td>
+        <td>{row.direction_label} {money(row.cents)}</td><td>{row.recognition}</td>
+      </tr>)}</tbody></table></div>}
       {data.summary.campaigns.map((item, index) => <p key={index}>{item['活动']} · {item['潜客数']} 个咨询 · {item['成交客户数']} 位成交</p>)}
-      <details><summary>查看模拟现金流水</summary><ul>{data.summary.ledger.map(row =>
-        <li key={row.id}>{row.purpose} · {row.direction === 'in' ? '收入' : '支出'} {money(row.cents)}</li>)}</ul></details></>}
+    </>}
     {data && tab === 'research' && <>
       <OperationForm title="生成固定演示报告" fields={[[ 'title', '调研主题', 'text' ]]} action="fixed_research" busy={busy} save={save} button="生成报告" />
       <OperationForm title="让 AI 生成模拟调研报告" fields={[[ 'title', '调研主题', 'text' ]]} action="model_research" busy={busy} save={save} button={busy ? '正在处理…' : '生成 AI 报告'} />
@@ -337,6 +364,19 @@ export function OrderExtras({ order }) {
     {order.plan_feedback && <p><strong>方案评价</strong> · {({
       satisfied: '满意', acceptable: '可以接受', unacceptable: '希望重做',
     })[order.plan_feedback.outcome]} {order.plan_feedback.comment}</p>}
+    {order.learning_usage?.length > 0 && <section className="feature-card">
+      <h3>本单参考了哪些历史反馈</h3>
+      {order.learning_usage.map(item => <article className="feature-card" key={item.id}>
+        <h4>{item.title}</h4>
+        <p>{({ adopted: '已采纳', adapted: '调整后采纳', not_applicable: '不适用' })[item.decision] ||
+          (item.supplied_to.length ? '已提供给团队，暂无采纳结论' : '已匹配，待提供给团队')}</p>
+        <p><a href={orderLink('case:' + item.source_case_id)}>打开来源订单</a> · 第 {item.source_version} 版 · {item.source_stage} · {formatTime(item.created_at)}</p>
+        {item.evidence.map((line, index) => <p key={index}>原客户反馈 · {line}</p>)}
+        <p>{item.match_reason}{item.supplied_to.length > 0 && ' · 已提供给' + item.supplied_to.join('、')}</p>
+        {item.detail && <p>团队说明 · {item.detail}</p>}
+        {item.schedule_entry && <p><strong>本单对应行程</strong> · {item.schedule_entry}</p>}
+      </article>)}
+    </section>}
     {order.delivery_feedback && <p><strong>履约评价</strong> · 总体 {order.delivery_feedback.overall_rating}/5 {order.delivery_feedback.comment}</p>}
   </>;
 }

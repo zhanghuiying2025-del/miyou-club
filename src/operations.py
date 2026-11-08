@@ -213,10 +213,90 @@ def redeem_coupon(tx, coupon_id, order, gross_cents):
     return discount
 
 
+def _order_finance_context(order):
+    selected = [quote for quote in order.get("quotes", []) if quote.get("id") in order.get("selected_quote_ids", [])]
+    resource_cents = sum(int(quote.get("total_cents", 0)) for quote in selected)
+    service_income_cents = max(0, int(order.get("service_fee_cents", 0)) - int(order.get("discount_cents", 0)))
+    delivered = bool(order.get("delivered")) or order.get("status") in {"delivered", "completed"}
+    completed = order.get("status") == "completed"
+    customer_paid_cents = int(order.get("customer_paid_cents", 0))
+    supplier_paid_cents = int(order.get("supplier_paid_cents", 0))
+    need = order.get("need") or {}
+    project_id = order.get("case_id") or order["id"]
+    return {
+        "project_id": project_id,
+        "supplier_order_id": order["id"],
+        "project_title": f"{need.get('city') or '未命名'}团建 · {need.get('check_in') or '日期待定'} · {need.get('participant_count') or (need.get('men', 0) + need.get('women', 0))}人",
+        "status": order.get("status", ""),
+        "status_label": ("已完成并结清供方" if completed else "已交付并确认收入，供方待结清" if delivered
+                         else "履约中，客户付款仍为预收款"),
+        "customer_id": order.get("customer_id", ""),
+        "supplier_names": "、".join(dict.fromkeys(quote.get("supplier_name", "模拟供应商") for quote in selected)) or "供应商待确认",
+        "customer_paid_cents": customer_paid_cents,
+        "supplier_paid_cents": supplier_paid_cents,
+        "advance_liability_cents": 0 if delivered else customer_paid_cents,
+        "supplier_payable_cents": max(0, resource_cents - supplier_paid_cents) if delivered else 0,
+        "recognized_revenue_cents": resource_cents + service_income_cents if delivered else 0,
+        "recognized_supplier_cost_cents": resource_cents if delivered else 0,
+        "service_income_cents": service_income_cents if delivered else 0,
+        "realized_order_profit_cents": service_income_cents if delivered else 0,
+    }
+
+
+def _ledger_rows(orders, campaigns, events):
+    order_contexts = {order["id"]: _order_finance_context(order) for order in orders}
+    campaign_contexts = {campaign["id"]: campaign for campaign in campaigns}
+    rows = []
+    for event in reversed(events):
+        row = dict(event)
+        event_id = row["id"]
+        order = order_contexts.get(row["entity_id"])
+        campaign = campaign_contexts.get(row["entity_id"])
+        if event_id.startswith("deposit:"):
+            flow_type, counterparty = "客户预付款", f"客户 {order['customer_id']}" if order else "客户"
+        elif event_id.startswith("tail:"):
+            flow_type, counterparty = "客户尾款", f"客户 {order['customer_id']}" if order else "客户"
+        elif event_id.startswith("supplier_deposit:"):
+            flow_type, counterparty = "供方定金", order["supplier_names"] if order else "供应商"
+        elif event_id.startswith("supplier_balance:"):
+            flow_type, counterparty = "供方尾款", order["supplier_names"] if order else "供应商"
+        elif event_id.startswith("campaign:"):
+            flow_type, counterparty = "推广支出", (campaign or {}).get("channel") or "模拟推广渠道"
+        else:
+            flow_type, counterparty = ("资金流入" if row["direction"] == "in" else "业务支出"), "待核实"
+        if order:
+            project_title, project_id = order["project_title"], order["project_id"]
+            recognition = ("已随项目交付确认收入" if order["status"] in {"delivered", "completed"} and row["direction"] == "in"
+                           else "客户预收款，尚未确认收入" if row["direction"] == "in"
+                           else "项目履约支出")
+        elif campaign:
+            project_title, project_id = f"获客活动 · {campaign['title']}", campaign["id"]
+            recognition = "公司运营费用"
+        else:
+            project_title, project_id, recognition = "未关联项目", row["entity_id"], "待核实"
+        row.update(
+            project_title=project_title,
+            project_id=project_id,
+            flow_type=flow_type,
+            counterparty=counterparty,
+            direction_label="流入" if row["direction"] == "in" else "流出",
+            recognition=recognition,
+        )
+        rows.append(row)
+    return rows
+
+
 def operating_summary():
     with transaction() as tx:
         orders,leads,campaigns = tx.all("supplier_order"),tx.all("lead"),tx.all("campaign")
         completed = [o for o in orders if o["status"] == "completed"]
+        cash_events = tx.events("cash")
+        project_finance = [_order_finance_context(order) for order in orders if order.get("customer_paid_cents") or order.get("supplier_paid_cents")]
+        recognized_revenue = sum(row["recognized_revenue_cents"] for row in project_finance)
+        recognized_supplier_cost = sum(row["recognized_supplier_cost_cents"] for row in project_finance)
+        realized_order_profit = sum(row["realized_order_profit_cents"] for row in project_finance)
+        operating_expense = sum(event["cents"] for event in cash_events
+                                if event["direction"] == "out" and event["entity_id"] not in {order["id"] for order in orders})
         rows=[]
         for campaign in campaigns:
             if campaign.get("deleted_at"):
@@ -225,9 +305,17 @@ def operating_summary():
             lead_count=sum(l.get("campaign_id") == campaign["id"] for l in leads)
             paid=[o for o in sourced if o["customer_paid_cents"] > 0]
             customers=len({o["customer_id"] for o in paid})
-            spent=sum(e["cents"] for e in tx.events("cash") if e["entity_id"] == campaign["id"] and e["direction"] == "out")
+            spent=sum(e["cents"] for e in cash_events if e["entity_id"] == campaign["id"] and e["direction"] == "out")
             rows.append({"活动":campaign["title"],"潜客数":lead_count,"成交客户数":customers,
                 "转化率":customers/lead_count if lead_count else None,"模拟推广支出（元）":spent/100})
         return {"finance":finance_summary(tx),"leads":len(leads),"paid_orders":sum(o["customer_paid_cents"]>0 for o in orders),
             "completed_orders":len(completed),"service_income_cents":sum(o["service_fee_cents"]-o["discount_cents"] for o in completed),
-            "campaigns":rows,"ledger":tx.events("cash")}
+            "advance_liability_cents":sum(row["advance_liability_cents"] for row in project_finance),
+            "supplier_payable_cents":sum(row["supplier_payable_cents"] for row in project_finance),
+            "recognized_revenue_cents":recognized_revenue,
+            "recognized_supplier_cost_cents":recognized_supplier_cost,
+            "realized_order_profit_cents":realized_order_profit,
+            "operating_expense_cents":operating_expense,
+            "net_profit_after_operations_cents":realized_order_profit-operating_expense,
+            "project_finance":project_finance,
+            "campaigns":rows,"ledger":_ledger_rows(orders,campaigns,cash_events)}

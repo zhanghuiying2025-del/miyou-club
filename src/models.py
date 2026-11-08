@@ -32,16 +32,50 @@ class CaseStatus(StrEnum):
     FAILED = "failed"
 
 
+class WeatherForecastDay(BaseModel):
+    date: str
+    condition: str
+    weather_code: int
+    temperature_min_c: float | None = None
+    temperature_max_c: float | None = None
+    precipitation_probability: float | None = None
+    wind_speed_max: float | None = None
+    risk_level: Literal["low", "medium", "high"] = "low"
+
+
+class WeatherForecast(BaseModel):
+    location: str
+    destination: str
+    event_date: str
+    end_date: str | None = None
+    days: list[WeatherForecastDay] = Field(default_factory=list)
+    condition: str
+    weather_code: int
+    temperature_min_c: float | None = None
+    temperature_max_c: float | None = None
+    precipitation_probability: float | None = None
+    wind_speed_max: float | None = None
+    clothing_advice: list[str] = Field(default_factory=list)
+    tips: list[str] = Field(default_factory=list)
+    risk_level: Literal["low", "medium", "high"] = "low"
+    fetched_at: str
+    source: str = "Open-Meteo"
+
+
 class RequirementSpec(BaseModel):
     event_name: str = "未命名团建"
     city: str | None = None
+    destination: str | None = None
     event_date: str | None = None
+    end_date: str | None = None
+    weather: WeatherForecast | None = None
     participant_count: int | None = None
     budget_yuan: float | None = None
     duration: str | None = None
     team_profile: str | None = None
     preferred_style: str | None = None
     desired_outcomes: list[str] = Field(default_factory=list)
+    attractions: list[str] = Field(default_factory=list)
     hard_constraints: list[str] = Field(default_factory=list)
     preferences: list[str] = Field(default_factory=list)
     special_needs: list[str] = Field(default_factory=list)

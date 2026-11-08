@@ -5,16 +5,18 @@ import logging
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, UUID4, field_validator
+from pydantic import BaseModel, Field, UUID4, field_validator, model_validator
 
 from src import storage, supplier_simulation as suppliers
 from src.agents import AgentConfigurationError, AgentOutputError, build_agent_team
-from src.models import CaseStatus, CustomerStyleFeedback, OutcomeFeedback, PlanAcceptanceFeedback, RequirementSpec
+from src.models import (CaseStatus, CustomerStyleFeedback, OutcomeFeedback, PlanAcceptanceFeedback,
+                          RequirementSpec, WeatherForecast)
 from src.operations import register_lead
 from src.order_labels import case_number
 from src.runtime import active_jobs, submit_once
 from src.supplier_models import BookingNeed, MealSlot
 from src.workflow import TravelAgencyWorkflow, WorkflowError
+from src import weather
 
 LOGGER = logging.getLogger(__name__)
 WORKING = {
@@ -29,13 +31,26 @@ class Brief(BaseModel):
     team: str = Field(default="", max_length=100)
     city: str = Field(min_length=1, max_length=100)
     destination: str = Field(default="", max_length=100)
-    event_city: str = Field(min_length=1, max_length=100)
+    event_city: str = Field(default="", max_length=100)
+    weather: WeatherForecast | None = None
     date: date
+    end_date: date | None = None
     flexible: bool = False
-    duration: Literal["半天", "1天", "2天1晚", "3天2晚"]
+    # Legacy input is accepted for old drafts, but the UI now derives duration from dates.
+    duration: Literal["半天", "1天", "2天1晚", "3天2晚"] | None = None
     budget: int = Field(ge=50, le=100000)
     goals: list[str] = Field(default_factory=list, max_length=10)
+    attractions: list[str] = Field(default_factory=list, max_length=5)
     notes: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def check_date_range(self):
+        end = self.end_date or self.date
+        if end < self.date:
+            raise ValueError("结束日期不能早于出发日期")
+        if (end - self.date).days > 15:
+            raise ValueError("单次活动最多安排16天")
+        return self
 
     @field_validator("name", "city", "event_city", mode="before")
     @classmethod
@@ -43,15 +58,26 @@ class Brief(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
     def requirements(self):
+        start = self.date
+        legacy_nights = {"2天1晚": 1, "3天2晚": 2}.get(self.duration, 0)
+        end = self.end_date or start + timedelta(days=legacy_nights)
+        days = (end - start).days + 1
+        nights = max(days - 1, 0)
+        derived_duration = f"{days}天" + (f"{nights}晚" if nights else "")
         details = [f"出发城市：{self.city}", self.notes]
         if self.destination:
             details.append(f"目的地偏好：{self.destination}")
+        if self.attractions:
+            details.append("偏好景点：" + "、".join(self.attractions))
         if self.flexible:
             details.append("活动日期可以协商，报价按本次确认日期计算")
         return RequirementSpec(
-            event_name=self.name, city=self.event_city, event_date=self.date.isoformat(),
-            participant_count=self.people, duration=self.duration, budget_yuan=self.people * self.budget,
-            team_profile=self.team, desired_outcomes=self.goals, preferences=[x for x in details if x],
+            event_name=self.name, city=self.event_city or self.city, destination=self.destination or None,
+            event_date=self.date.isoformat(), end_date=end.isoformat(), weather=self.weather,
+            participant_count=self.people, duration=(self.duration if self.end_date is None and self.duration else derived_duration),
+            budget_yuan=self.people * self.budget,
+            team_profile=self.team, desired_outcomes=self.goals, attractions=self.attractions,
+            preferred_style="、".join(self.goals), preferences=[x for x in details if x],
         )
 
 
@@ -83,6 +109,7 @@ class Action(BaseModel):
     grade: int = Field(default=2, ge=1, le=3)
     dietary: str = Field(default="", max_length=1000)
     feedback: OutcomeFeedback | None = None
+    weather: WeatherForecast | None = None
     coupon_id: str | None = Field(default=None, max_length=100)
     campaign_id: str | None = Field(default=None, max_length=100)
     fields: dict[str, str | int | None] = Field(default_factory=dict, max_length=10)
@@ -251,7 +278,7 @@ def customer_questions(case, status):
     return list(dict.fromkeys([*(finding.description for finding in findings), *case.customer_questions]))
 
 
-def customer_actions(case, booking):
+def _customer_actions(case, booking):
     status = case.status
     if planning_active(case.id):
         return []
@@ -304,6 +331,17 @@ def customer_actions(case, booking):
     if order.status == "completed" and not case.delivery_feedback:
         return ["delivery_feedback"]
     return []
+
+
+def customer_actions(case, booking):
+    actions = _customer_actions(case, booking)
+    if (case.council_decision and not case.journey_demo
+            and booking is None and not case.procurement_order
+            and case.status in {CaseStatus.WAITING_DRAFT, CaseStatus.READY_FOR_CUSTOMER, CaseStatus.COMPLETED}
+            and case.service_mode not in {"document_intake", "activity_review"}
+            and not planning_active(case.id)):
+        actions = [*actions, "weather_replan"]
+    return actions
 
 
 def owner_actions(case, booking):
@@ -379,6 +417,26 @@ def plan_views(case):
             for index, item in enumerate(case.creative_opinions, 1)]
 
 
+def learning_view(case):
+    plan = case.council_decision
+    schedule = plan.schedule if plan else []
+    responses = {item.lesson_id: item for item in plan.learning_responses} if plan else {}
+    entries = []
+    for application in case.learning_applications:
+        lesson = application.lesson
+        response = responses.get(lesson.id)
+        index = response.schedule_index if response and response.decision != "not_applicable" else None
+        entries.append({
+            "id": lesson.id, "title": lesson.title, "source_case_id": lesson.source_case_id,
+            "source_version": lesson.source_version, "source_stage": lesson.source_stage,
+            "created_at": lesson.created_at, "evidence": lesson.evidence, "match_reason": application.match_reason,
+            "supplied_to": application.supplied_to, "decision": response.decision if response else None,
+            "detail": response.detail if response else "",
+            "schedule_entry": schedule[index] if index is not None and 0 <= index < len(schedule) else "",
+        })
+    return entries
+
+
 def activity_view(case):
     from src.web_activity import document_view
     booking = booking_for(case)
@@ -430,6 +488,30 @@ def customer_action(case, payload):
     booking = booking_for(case)
     if action not in customer_actions(case, booking):
         raise WorkflowError("当前阶段无法执行该操作，请刷新后查看。")
+    if action == "weather_replan":
+        req = case.requirements
+        if not req or not req.event_date:
+            raise WorkflowError("当前活动缺少可查询的日期和目的地。")
+        match = re.search(r"(\d+)天", req.duration or "")
+        days = int(match.group(1)) if match else 1
+        start = date.fromisoformat(req.event_date)
+        end = date.fromisoformat(req.end_date) if req.end_date else start + timedelta(days=max(days - 1, 0))
+        forecast = payload.weather
+        if forecast is None:
+            try:
+                # Re-read the whole date range when no fresh UI snapshot is sent:
+                # drafts must not keep planning from a stale one-day forecast.
+                forecast = weather.fetch_weather(
+                    req.destination or req.city or "", start, req.city, end,
+                )
+            except weather.WeatherError as exc:
+                raise WorkflowError(str(exc)) from exc
+        if forecast.event_date != start.isoformat() or (forecast.end_date or forecast.event_date) != end.isoformat():
+            raise WorkflowError("天气预报与活动日期不一致，请刷新后再更新草案。")
+        req.end_date = end.isoformat()
+        req.weather = forecast
+        enqueue(case, action, lambda team, item: team.replan_for_weather(item, forecast, payload.note.strip()))
+        return
     if case.service_mode in {"document_intake", "activity_review"}:
         from src.web_activity import apply_document_action
         apply_document_action(case, payload, enqueue, start_planning)

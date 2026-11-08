@@ -166,6 +166,12 @@ class FeedbackLearningTests(unittest.TestCase):
         self.assertEqual(len(result.learning_responses), 1)
         self.assertEqual(result.learning_responses[0].detail, "保留分组，增加共同集合")
         self.assertEqual(second.learning_applications[0].supplied_to, ["项目经理"])
+        from src.web_flow import learning_view
+        second.council_decision = result
+        row, = learning_view(second)
+        self.assertEqual(row["source_case_id"], lesson.source_case_id)
+        self.assertEqual(row["decision"], "adapted")
+        self.assertEqual(row["schedule_entry"], result.schedule[0])
 
     def test_disabled_record_is_not_supplied_and_invalidates_check_cache(self):
         self.positive()

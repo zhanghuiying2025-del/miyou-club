@@ -34,7 +34,7 @@ export function UploadDocuments({ onCreated }) {
 function FieldEditor({ activity }) {
   const req = activity.requirements || {};
   return <div className="connected-grid">
-    <label>活动城市<input name="city" maxLength={100} defaultValue={req.city || ''} /></label>
+    <label>出发城市<input name="city" maxLength={100} defaultValue={req.city || ''} /></label>
     <label>活动场地<input name="venue" maxLength={200} defaultValue={activity.venue || ''} /></label>
     <label>活动日期<input name="event_date" type="date" defaultValue={req.event_date || ''} /></label>
     <label>参与人数<input name="participant_count" type="number" min="1" max="100000" defaultValue={req.participant_count || ''} /></label>
