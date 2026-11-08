@@ -1,0 +1,15 @@
+**
+!requirements.txt
+!src/
+!src/**
+!assets/
+!assets/**
+!frontend/
+!frontend/**
+
+**/.env*
+**/node_modules/
+**/dist/
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
