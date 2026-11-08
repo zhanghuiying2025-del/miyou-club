@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { api, money, useResource } from '../../shared/api.js';
+import { MarketingCampaigns } from './MarketingCampaigns.jsx';
 
 const orderLink = key => '#/orders/' + encodeURIComponent(key);
 const formatTime = time => time && new Date(time).toLocaleString('zh-CN', { hour12: false });
@@ -238,11 +239,13 @@ function OperationForm({ title, fields, action, busy, save, button = '保存' })
   </form>;
 }
 
-export function Operations() {
+const operationTabs = { ledger: '经营记录', research: '市场调研', campaigns: '获客活动', coupons: '优惠券' };
+
+export function Operations({ activeTab, marketing, setMarketing }) {
   const { data, error, refresh } = useResource('/owner/operations');
-  const [tab, setTab] = useState('ledger');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const tab = Object.hasOwn(operationTabs, activeTab) ? activeTab : 'ledger';
   async function save(body) {
     setBusy(true);
     setMessage('');
@@ -253,19 +256,21 @@ export function Operations() {
     } catch (failure) { setMessage(failure.message); }
     finally { setBusy(false); }
   }
-  if (!data) return <p role={error ? 'alert' : 'status'}>{error?.message || '正在读取公司记录…'}</p>;
   const options = (items, label) => items.map(item => [item.id, item[label] || item.id]);
   return <>
     <p>市场报告、推广支出和优惠均用于模拟经营。</p>
-    <div className="connected-actions">{Object.entries({ ledger: '经营记录', research: '市场调研', campaigns: '获客活动', coupons: '优惠券' }).map(([key, label]) =>
-      <button className={'btn ' + (tab === key ? 'primary' : 'outline')} key={key} onClick={() => setTab(key)}>{label}</button>)}</div>
+    <nav className="connected-actions operations-tabs" aria-label="公司运营">{Object.entries(operationTabs).map(([key, label]) =>
+      <a className={'btn ' + (tab === key ? 'primary' : 'outline')} key={key} href={key === 'ledger' ? '#/operations' : '#/operations/' + key}
+        aria-current={tab === key ? 'page' : undefined}>{label}</a>)}</nav>
+    {tab === 'campaigns' && <MarketingCampaigns marketing={marketing} setMarketing={setMarketing} />}
+    {!data && <p role={error ? 'alert' : 'status'}>{error?.message || '正在读取公司记录…'}</p>}
     {message && <p role="status">{message}</p>}
-    {tab === 'ledger' && <><p>咨询 {data.summary.leads} 个 · 已付 {data.summary.paid_orders} 笔 · 已结清 {data.summary.completed_orders} 笔</p>
+    {data && tab === 'ledger' && <><p>咨询 {data.summary.leads} 个 · 已付 {data.summary.paid_orders} 笔 · 已结清 {data.summary.completed_orders} 笔</p>
       <p>模拟余额 {money(data.summary.finance.cash_cents)} · 已确认净服务费 {money(data.summary.service_income_cents)}</p>
       {data.summary.campaigns.map((item, index) => <p key={index}>{item['活动']} · {item['潜客数']} 个咨询 · {item['成交客户数']} 位成交</p>)}
       <details><summary>查看模拟现金流水</summary><ul>{data.summary.ledger.map(row =>
         <li key={row.id}>{row.purpose} · {row.direction === 'in' ? '收入' : '支出'} {money(row.cents)}</li>)}</ul></details></>}
-    {tab === 'research' && <>
+    {data && tab === 'research' && <>
       <OperationForm title="生成固定演示报告" fields={[[ 'title', '调研主题', 'text' ]]} action="fixed_research" busy={busy} save={save} button="生成报告" />
       <OperationForm title="让 AI 生成模拟调研报告" fields={[[ 'title', '调研主题', 'text' ]]} action="model_research" busy={busy} save={save} button={busy ? '正在处理…' : '生成 AI 报告'} />
       {data.research.map(item => <details className="feature-card" key={item.id}>
@@ -274,7 +279,8 @@ export function Operations() {
         <p>{item.report?.opportunities.join('；')}</p>
       </details>)}
     </>}
-    {tab === 'campaigns' && <>
+    {data && tab === 'campaigns' && <details className="feature-card">
+      <summary>手动创建与历史获客活动</summary>
       <OperationForm title="创建获客活动草案" fields={[[ 'title', '活动名称', 'text' ], ['audience', '面向人群', 'text'],
         ['channel', '渠道', 'text'], ['amount', '模拟预算（元）', 'money'], ['content', '活动内容', 'textarea'],
         ['research_id', '参考报告', 'text', [['', '不指定'], ...options(data.research, 'topic')]]]} action="create_campaign" busy={busy} save={save} />
@@ -288,8 +294,8 @@ export function Operations() {
           ['amount', '支出（元）', 'money'], ['reference', '唯一凭证编号', 'text']]}
         action="campaign_spend" busy={busy} save={save} />}
       <details><summary>查看已登记的咨询</summary><ul>{data.lead.map(item => <li key={item.id}>{item.id} · {item.interest}</li>)}</ul></details>
-    </>}
-    {tab === 'coupons' && <>
+    </details>}
+    {data && tab === 'coupons' && <>
       <OperationForm title="创建模拟优惠政策" fields={[[ 'title', '名称', 'text' ], ['amount', '优惠金额（元）', 'money'],
         ['minimum', '使用门槛（元）', 'money'], ['start', '开始日期', 'date'], ['end', '截止日期', 'date'],
         ['audience', '客群', 'text', ['全部', '首单', '老客'].map(v => [v, v])], ['limit', '发放上限', 'number'],

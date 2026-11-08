@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { api, money, useResource } from '../../shared/api.js';
 import { Archive, Exceptions, Lessons, Operations, OrderExtras, problemText, taskStep } from './Features.jsx';
+import { formatMarketingDate, initialMarketing, marketingRate } from './MarketingCampaigns.jsx';
 import './connected.css';
 
 const navigation = [
@@ -25,11 +26,12 @@ const taskLabels = { running: '进行中', completed: '已完成', failed: '失�
 const exception = task => ['failed', 'interrupted'].includes(task.status);
 const orderPath = key => '/owner/orders/' + encodeURIComponent(key);
 const orderHref = key => '#/orders/' + encodeURIComponent(key);
+const marketingHref = '#/operations/campaigns';
 
 function readPage() {
   try {
     const [section, key] = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
-    return { section, key: section === 'orders' ? key : null };
+    return { section, key: section === 'orders' ? key : null, tab: section === 'operations' ? key : undefined };
   } catch {
     return { section: '', key: null };
   }
@@ -39,6 +41,7 @@ export function App() {
   const [page, setPage] = useState(readPage);
   const [session, setSession] = useState(0);
   const [mobile, setMobile] = useState(false);
+  const [marketing, setMarketing] = useState(initialMarketing);
   const dashboard = useResource('/owner/dashboard?session=' + session, api, 2500);
   useEffect(() => {
     function navigate() { setPage(readPage()); setMobile(false); }
@@ -76,7 +79,7 @@ export function App() {
       </header>
       {dashboard.error && <p className="connected-alert" role="alert">{dashboard.error.message}</p>}
       {!data && !dashboard.error && <p role="status">正在读取经营记录…</p>}
-      {data && (page.section === '' ? <Overview data={data} pending={pending} problems={problems} /> :
+      {data && (page.section === '' ? <Overview data={data} pending={pending} problems={problems} marketing={marketing} /> :
         <section className="panel connected-page">
           <div className="panel-heading"><h1>{title || '工作台'}</h1></div>
           {page.section === 'approvals' && <OrderList rows={pending} empty="当前没有待老板处理的订单。" />}
@@ -86,7 +89,7 @@ export function App() {
           {page.section === 'errors' && <Exceptions tasks={problems} orders={data.orders} />}
           {page.section === 'archive' && <Archive />}
           {page.section === 'lessons' && <Lessons />}
-          {page.section === 'operations' && <Operations />}
+          {page.section === 'operations' && <Operations activeTab={page.tab} marketing={marketing} setMarketing={setMarketing} />}
           {page.section === 'review' && <Review data={data} />}
           {page.section === 'rules' && <div className="fact-grid">
             <Fact label="重大风险需要老板审批" value={data.policy.high_risk_requires_owner ? '启用' : '关闭'} />
@@ -95,7 +98,10 @@ export function App() {
           </div>}
           {page.section === 'logs' && <TaskList rows={data.tasks} empty="目前还没有任务记录。" />}
           {page.section === 'notifications' && <OrderList rows={pending} empty="当前没有待办通知。" />}
-          {page.section === 'settings' && <Settings onLogout={() => setSession(value => value + 1)} />}
+          {page.section === 'settings' && <Settings onLogout={() => {
+            setMarketing(initialMarketing);
+            setSession(value => value + 1);
+          }} />}
         </section>)}
       <footer className="workspace-footer"><a href="#/logs">工作日志</a><span>咪游社 Miyou Club</span></footer>
     </main>
@@ -128,7 +134,7 @@ function Login({ onLogin }) {
   </form></main>;
 }
 
-function Overview({ data, pending, problems }) {
+function Overview({ data, pending, problems, marketing }) {
   const metrics = [
     ['当前登记订单', data.orders.length, Layers, 'orders'],
     ['团建主单已付', data.main_orders.paid, Coins, 'review'],
@@ -139,6 +145,8 @@ function Overview({ data, pending, problems }) {
     ['订单与风险', data.orders.length, '查看从需求到交付的进度', 'orders', TriangleAlert, 'intervention-card'],
     ['待处理异常', problems.filter(task => !task.recovered).length, '查看失败或中断的工作', 'errors', CircleX, 'error-card'],
   ];
+  const recentTasks = data.tasks.filter(task => task.status === 'completed' || task.status === 'failed')
+    .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0)).slice(0, 5);
   return <>
     <section className="hero">
       <div className="greeting"><img className="mascot" src={import.meta.env.BASE_URL + 'assets/miyou-robot.png'} alt="咪游机器人" />
@@ -152,10 +160,60 @@ function Overview({ data, pending, problems }) {
         <ArrowRight className="triage-arrow" />
       </a>)}</section>
     <div className="dashboard-grid">
-      <section className="panel connected-page"><h2>待处理订单</h2><OrderList rows={pending.slice(0, 5)} empty="当前没有待办。" /></section>
-      <section className="panel connected-page"><h2>团队最近动态</h2><TaskList rows={data.tasks.slice(0, 5)} empty="暂无任务动态。" /></section>
+      <AcquisitionOverview marketing={marketing} />
+      <div className="dashboard-side">
+        <section className="panel connected-page"><h2>待处理订单</h2><OrderList rows={pending.slice(0, 5)} empty="当前没有待办。" /></section>
+        <section className="panel connected-page">
+          <h2>团队最近动态</h2>
+          {recentTasks.length ? <ul className="team-summary">{recentTasks.map((task, index) =>
+            <li key={task.order_key + ':' + index}>
+              <strong>{task.actor} · {taskStep(task) || task.title}</strong>
+              <span className={'tag ' + (task.status === 'completed' ? 'green' : 'team-failed')}>
+                {task.status === 'completed' ? '成功' : '失败'}
+              </span>
+            </li>)}</ul> : <p className="muted">暂无已完成或失败的任务。</p>}
+          <div className="dashboard-card-footer"><a className="btn primary" href="#/team">查看团队动态 <ArrowRight size={16} aria-hidden="true" /></a></div>
+        </section>
+      </div>
     </div>
   </>;
+}
+
+function AcquisitionOverview({ marketing }) {
+  let inquiries = 0;
+  let paid = 0;
+  let latest;
+  for (const campaign of marketing) {
+    if (campaign.status !== 'published') continue;
+    inquiries += campaign.stages.inquiries;
+    paid += campaign.stages.paid;
+    for (const metric of campaign.metrics) {
+      if (!latest || metric.recordedAt > latest.metric.recordedAt) latest = { campaign, metric };
+    }
+  }
+
+  return <section className="panel connected-page acquisition-overview">
+    <div className="marketing-heading"><h2>获客概览</h2><span className="tag neutral">演示数据</span></div>
+    <div className="acquisition-columns">
+      <section>
+        <h3>站内转化</h3><p className="marketing-muted">推广链接归因 · 发布以来</p>
+        <dl className="acquisition-metrics">
+          <div><dt>有效咨询</dt><dd>{inquiries}</dd></div>
+          <div><dt>模拟已付</dt><dd>{paid}</dd></div>
+          <div><dt>需求付费转化率</dt><dd>{marketingRate(paid, inquiries)}</dd></div>
+        </dl>
+      </section>
+      <section>
+        <h3>站外表现</h3><p className="marketing-muted">最近录入的活动</p>
+        {latest ? <div className="acquisition-recent">
+          <strong>{latest.campaign.channel} · {latest.campaign.goal}</strong>
+          <p className="marketing-muted">{latest.metric.views == null ? '浏览量未录入' : `${latest.metric.views.toLocaleString('zh-CN')} 次累计浏览`}
+            {' · 统计至 '}{formatMarketingDate(latest.metric.date)}</p>
+        </div> : <p className="marketing-muted acquisition-recent">暂无站外记录</p>}
+      </section>
+    </div>
+    <div className="dashboard-card-footer"><a className="btn primary" href={marketingHref}>查看获客活动 <ArrowRight size={16} aria-hidden="true" /></a></div>
+  </section>;
 }
 
 function OrderList({ rows, search = false, empty }) {

@@ -26,3 +26,45 @@
 .feature-form input:not([type=checkbox]), .feature-form select { display: block; width: min(100%, 36rem); margin: 5px 0; padding: 9px; font: inherit; color: inherit; border: 1px solid #a2ab91; border-radius: 8px; }
 .feature-form > .btn { justify-self: start; }
 .feature-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 26rem; overflow: auto; }
+.dashboard-side { display: grid; gap: 16px; margin: 12px 0; min-width: 0; }
+.dashboard-side > .connected-page { margin: 0; }
+.dashboard-card-footer { display: flex; justify-content: flex-end; margin-top: 16px; }
+.dashboard-card-footer a, .operations-tabs a { text-decoration: none; }
+.team-summary { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.team-summary li { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.team-summary strong { overflow-wrap: anywhere; }
+.team-summary .tag { flex-shrink: 0; }
+.tag.team-failed { color: #8e2924; background: #faeae4; }
+.acquisition-columns { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; margin-top: 16px; }
+.acquisition-columns > section + section { border-left: 1px solid var(--line); padding-left: 16px; }
+.acquisition-columns h3 { margin-bottom: 4px; }
+.acquisition-recent { margin-top: 12px; overflow-wrap: anywhere; }
+.acquisition-overview .acquisition-metrics, .marketing-page .marketing-metrics { display: flex; flex-wrap: wrap; gap: 10px 20px; margin: 12px 0 0; }
+.acquisition-overview .acquisition-metrics div, .marketing-page .marketing-metrics div { display: block; }
+.acquisition-metrics dt, .marketing-metrics dt, .marketing-muted { color: #62695d; font-size: .875rem; }
+.acquisition-metrics dd, .marketing-metrics dd { margin: 4px 0 0; font-size: 1.375rem; font-variant-numeric: tabular-nums; }
+.marketing-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); align-items: start; gap: 16px; margin-top: 14px; }
+.marketing-sidebar { display: grid; gap: 16px; min-width: 0; }
+.marketing-panel { padding: 16px; border: 1px solid #dddcd0; border-radius: 12px; min-width: 0; overflow-wrap: anywhere; }
+.marketing-panel.feature-card { margin: 0; }
+.marketing-heading { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.marketing-heading h2, .marketing-heading h3 { margin-bottom: 0; }
+.marketing-campaign-list { display: grid; gap: 8px; list-style: none; margin: 0; padding: 0; }
+.marketing-campaign-option { display: grid; gap: 4px; width: 100%; text-align: left; padding: 9px 12px; border: 1px solid #dddcd0; border-radius: 8px; }
+.marketing-campaign-option[aria-pressed='true'] { background: var(--pale); border-color: #a5ba94; }
+.marketing-draft, .marketing-review { margin-top: 12px; padding: 12px; border-radius: 8px; background: var(--pale); white-space: pre-wrap; }
+.marketing-link { display: block; width: 100%; min-width: 0; margin: 6px 0; padding: 8px; font: inherit; border: 1px solid #a2ab91; border-radius: 8px; }
+.marketing-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.marketing-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.marketing-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.marketing-actions .btn { white-space: normal; }
+@media (min-width: 960px) {
+  .workspace .dashboard-grid { grid-template-columns: minmax(0, 1.39fr) minmax(0, 1fr); }
+}
+@media (max-width: 1350px) and (min-width: 960px), (max-width: 560px) {
+  .acquisition-columns { grid-template-columns: minmax(0, 1fr); }
+  .acquisition-columns > section + section { border-top: 1px solid var(--line); border-left: 0; padding: 12px 0 0; }
+}
+@media (max-width: 850px) {
+  .marketing-grid { grid-template-columns: minmax(0, 1fr); }
+}
