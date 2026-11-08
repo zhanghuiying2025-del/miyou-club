@@ -20,6 +20,24 @@ from test_style_request_flow import TEAM, brief
 
 
 class WebOrderTests(unittest.TestCase):
+    def test_railway_accepts_only_public_browser_origin_and_uses_secure_cookies(self):
+        domain = "miyou.up.railway.app"
+        password = "test-password"
+        with patch.dict(os.environ, {"RAILWAY_PUBLIC_DOMAIN": domain, "MIYOU_OWNER_PASSWORD": password}):
+            with TestClient(create_app(), base_url="http://railway-internal") as client:
+                payload = {"password": password}
+                rejected = client.post("/api/owner/session", json=payload, headers={
+                    "Origin": "https://other.example", "X-Forwarded-Host": "other.example",
+                    "X-Forwarded-Proto": "https",
+                })
+                self.assertEqual(rejected.status_code, 403)
+                login = client.post("/api/owner/session", json=payload, headers={"Origin": f"https://{domain}"})
+                self.assertEqual(login.status_code, 200)
+                self.assertIn("; Secure", login.headers["set-cookie"])
+                session = client.get("/api/customer/session")
+                self.assertEqual(session.status_code, 200)
+                self.assertIn("; Secure", session.headers["set-cookie"])
+
     def test_customer_and_owner_complete_same_order(self):
         plan = CouncilDecision(theme="室内团队协作", summary="室内协作后聚餐",
                                schedule=["09:00 室内小组协作", "12:00 午餐"],

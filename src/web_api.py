@@ -1,4 +1,4 @@
-"""Single-process local entry point for the customer and owner React apps."""
+"""Single-process entry point for the customer and owner React apps."""
 from datetime import date, timedelta
 from hashlib import sha256
 import os
@@ -71,14 +71,16 @@ def attachments_from(files):
 
 
 def create_app(frontend=FRONTEND):
-    app = FastAPI(title="咪游社 · 本地团建 API")
+    app = FastAPI(title="咪游社 · 团建 API")
     owner_session = token_urlsafe(32)
+    public_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    public_origin = ("https", public_domain) if public_domain else None
 
     @app.middleware("http")
     async def api_headers(request, call_next):
         if request.url.path.startswith("/api/"):
             if request.method == "POST" and (origin := request.headers.get("origin")):
-                expected = (request.url.scheme, request.headers.get("host"))
+                expected = public_origin or (request.url.scheme, request.headers.get("host"))
                 supplied = urlsplit(origin)
                 if (supplied.scheme, supplied.netloc) != expected:
                     return JSONResponse({"detail": "请从咪游社页面发起操作。"}, status_code=403)
@@ -122,7 +124,7 @@ def create_app(frontend=FRONTEND):
     def customer_session(request: Request, response: Response):
         if not BROWSER_ID.fullmatch(request.cookies.get(CUSTOMER_COOKIE, "")):
             response.set_cookie(CUSTOMER_COOKIE, token_urlsafe(32), httponly=True, samesite="strict",
-                                max_age=30 * 24 * 60 * 60)
+                                secure=public_origin is not None, max_age=30 * 24 * 60 * 60)
         return {"role": "customer"}
 
     @app.get("/api/customer/activities")
@@ -277,7 +279,8 @@ def create_app(frontend=FRONTEND):
             raise HTTPException(503, "请在 PowerShell 设置老板口令 MIYOU_OWNER_PASSWORD 后重启服务。")
         if not compare_digest(payload.password.encode(), password.encode()):
             raise HTTPException(401, "老板工作台口令不正确。")
-        response.set_cookie(OWNER_COOKIE, owner_session, httponly=True, samesite="strict")
+        response.set_cookie(OWNER_COOKIE, owner_session, httponly=True, samesite="strict",
+                            secure=public_origin is not None)
         return {"role": "owner"}
 
     @app.post("/api/owner/logout")
