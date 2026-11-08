@@ -1,7 +1,9 @@
 """Exercise the added role-specific React capabilities with isolated stores."""
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 import asyncio
 from hashlib import sha256
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,7 +15,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from src import company_store, operations, performance, storage, supplier_simulation
+from src import company_store, marketing, operations, performance, storage, supplier_simulation
 from src.agents import AgentOutputError
 from src.models import (ApprovalRequest, AuditEvent, CaseStatus, CouncilDecision, FeedbackAssessment, JourneyResponse,
                         PlanAcceptanceFeedback, RequirementSpec, ReviewFinding, ReviewResult, TaskHandoff)
@@ -56,6 +58,156 @@ class WebFeatureTests(unittest.TestCase):
         return self.read(client.post(path + "/actions", json={
             "action": action, "revision": item["revision"], **fields,
         }))
+
+    def test_marketing_approval_attribution_metrics_and_review(self):
+        api = "/api/owner/marketing"
+        draft = marketing.CampaignDraft(channel="小红书", title="团建预算攻略", reason="面向团建负责人", content="填写团建需求，查看方案。")
+        review = marketing.ReviewDraft(title="补充报价流程", body="测试文末引导", limitations="样本很少",
+                                       next_goal="解释如何查看报价", next_channel="小红书")
+        generation = {"request_id": str(uuid4()), "goal": "获取团建咨询", "audience": "企业行政", "channel": "由 Agent 推荐"}
+        brief_payload = {
+            "request_id": str(uuid4()), "utm_source": "xiaohongshu",
+            "brief": {"name": "客户自填的活动名", "people": 15, "team": "团队同事", "city": "北京", "event_city": "北京",
+                      "date": (date.today() + timedelta(days=5)).isoformat(), "duration": "1天", "budget": 700},
+        }
+        model = AsyncMock(side_effect=[AgentOutputError("模型失败"), draft, review])
+        with (patch("src.marketing.build_marketing_agent"), patch("src.marketing.run_structured", new=model),
+              patch("src.web_flow.start_planning")):
+            self.assertEqual(self.customer.get(api + "/summary").status_code, 401)
+            self.assertEqual(self.customer.post(api + "/generate", json=generation).status_code, 401)
+            self.assertEqual(self.owner.post(api + "/generate", json=generation).status_code, 502)
+            self.assertEqual(self.read(self.owner.get(api + "/summary"))["campaigns"], [])
+            campaign = self.read(self.owner.post(api + "/generate", json=generation))
+            self.assertEqual(campaign["status"], "pending")
+            self.assertFalse(campaign.get("tracking_path"))
+            self.assertEqual(self.read(self.owner.post(api + "/generate", json=generation))["id"], campaign["id"])
+            self.assertEqual(model.await_count, 2)
+            self.assertEqual(self.owner.post(api + "/generate", json={**generation, "goal": "更换目标"}).status_code, 409)
+            path = api + "/" + campaign["id"]
+            self.assertEqual(self.owner.post(path + "/actions", json={"action": "publish"}).status_code, 409)
+            self.assertGreaterEqual(self.owner.post("/api/owner/operations", json={
+                "action": "activate_campaign", "id": campaign["id"],
+            }).status_code, 400)
+
+            activity_api = "/api/customer/activities"
+            payload = {**brief_payload, "utm_campaign": campaign["id"]}
+            before = self.read(self.customer.post(activity_api, json=payload))
+            self.assertIsNone(storage.load_case_from_disk(before["id"]).marketing_campaign_id)
+            self.assertEqual(self.read(self.owner.post(path + "/actions", json={"action": "approve"}))["status"], "approved")
+            published = self.read(self.owner.post(path + "/actions", json={"action": "publish", "publication_mode": "manual"}))
+            self.assertEqual(published["status"], "published")
+            self.assertIn("utm_source=xiaohongshu", published["tracking_path"])
+            self.assertEqual(self.read(self.customer.post(activity_api, json=payload))["id"], before["id"])
+            self.assertIsNone(storage.load_case_from_disk(before["id"]).marketing_campaign_id)
+
+            for source in ("wechat_moments", ["xiaohongshu"]):
+                invalid = self.read(self.customer.post(activity_api, json={
+                    **payload, "request_id": str(uuid4()), "utm_source": source,
+                }))
+                self.assertIsNone(storage.load_case_from_disk(invalid["id"]).marketing_campaign_id)
+            attributed = {**payload, "request_id": str(uuid4())}
+            activity = self.read(self.customer.post(activity_api, json=attributed))
+            self.assertEqual(storage.load_case_from_disk(activity["id"]).marketing_campaign_id, campaign["id"])
+            self.assertEqual(self.read(self.customer.post(activity_api, json={
+                **attributed, "utm_campaign": "wrong",
+            }))["id"], activity["id"])
+            attached = self.read(self.customer.post(activity_api + "/with-files",
+                data={"payload": json.dumps({**payload, "request_id": str(uuid4())})},
+                files=[("files", ("活动.docx", word_file(paragraph(SOURCE)),
+                                  "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))]))
+            self.assertEqual(storage.load_case_from_disk(attached["id"]).marketing_campaign_id, campaign["id"])
+
+            stats_date = date.today().isoformat()
+            self.read(self.owner.post(path + "/metrics", json={"date": stats_date, "views": 90, "likes": 0}))
+            self.assertEqual(self.owner.post(path + "/metrics", json={"date": stats_date, "views": -1}).status_code, 422)
+            analyzed = self.read(self.owner.post(path + "/analyze", json={}))
+            self.assertEqual(analyzed["review"]["next_goal"], review.next_goal)
+            self.assertEqual(analyzed["stages"], {"inquiries": 2, "plans": 0, "bookings": 0, "paid": 0})
+            self.assertNotIn("客户自填的活动名", str(model.await_args))
+            self.read(self.owner.post(path + "/metrics", json={"date": stats_date, "views": 100, "likes": 0}))
+            reopened = TestClient(create_app())
+            self.read(reopened.post("/api/owner/session", json={"password": "local-test-password"}))
+            saved, = self.read(reopened.get(api + "/summary"))["campaigns"]
+            self.assertEqual(saved["metrics"][0]["views"], 100)
+            self.assertEqual(saved["metrics"][0]["likes"], 0)
+            self.assertIsNone(saved["metrics"][0]["comments"])
+            self.assertEqual(len(saved["metrics"]), 1)
+            self.assertEqual(saved["review"], analyzed["review"])
+
+            tasks = [task for task in self.read(reopened.get("/api/owner/dashboard"))["tasks"] if task.get("kind") == "marketing"]
+            self.assertCountEqual([(task["title"], task["status"]) for task in tasks], [
+                ("生成营销文案", "failed"), ("生成营销文案", "completed"), ("生成营销复盘", "completed"),
+            ])
+            self.assertTrue(all(task["campaign_id"] == campaign["id"] for task in tasks if task["status"] == "completed"))
+
+            self.assertEqual(self.customer.post(path + "/delete", json={}).status_code, 401)
+            self.assertEqual(self.read(reopened.post(path + "/delete", json={})), {"id": campaign["id"]})
+            self.assertEqual(self.read(reopened.post(path + "/delete", json={})), {"id": campaign["id"]})
+            self.assertEqual(self.read(reopened.get(api + "/summary"))["campaigns"], [])
+            self.assertEqual(self.read(reopened.get("/api/owner/operations"))["campaign"], [])
+            self.assertEqual(self.read(self.customer.get("/api/customer/marketing"))["campaigns"], [])
+            self.assertEqual(reopened.post(path + "/analyze", json={}).status_code, 404)
+            self.assertEqual(reopened.post(api + "/generate", json=generation).status_code, 404)
+            self.assertIsNotNone(company_store.read_record("campaign", campaign["id"])[0]["review"])
+            self.assertEqual(storage.load_case_from_disk(activity["id"]).marketing_campaign_id, campaign["id"])
+            after = self.read(self.customer.post(activity_api, json={**payload, "request_id": str(uuid4())}))
+            self.assertIsNone(storage.load_case_from_disk(after["id"]).marketing_campaign_id)
+
+    def test_marketing_tasks_show_running_and_record_each_retry(self):
+        api = "/api/owner/marketing"
+        draft = marketing.CampaignDraft(channel="小红书", title="团建推广", reason="目标客群", content="提交团建需求。")
+        review = marketing.ReviewDraft(title="记录咨询", body="先收集咨询", limitations="暂时没有样本",
+                                       next_goal="补充说明", next_channel="小红书")
+        owner_tab = TestClient(self.owner.app, cookies=dict(self.owner.cookies))
+
+        def tasks():
+            return [task for task in self.read(self.owner.get("/api/owner/dashboard"))["tasks"] if task.get("kind") == "marketing"]
+
+        def finish_blocked_request(path, payload, title, campaign_id, result):
+            entered, release = Event(), Event()
+
+            async def hold(*_args):
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError("测试未释放模型响应")
+                return result
+
+            model = AsyncMock(side_effect=hold)
+            with patch("src.marketing.run_structured", new=model), ThreadPoolExecutor(max_workers=1) as pool:
+                request = pool.submit(owner_tab.post, path, json=payload)
+                try:
+                    self.assertTrue(entered.wait(10), "模型没有开始执行")
+                    running, = [task for task in tasks() if task["status"] == "running"]
+                    self.assertEqual(running["actor"], "营销 Agent")
+                    self.assertEqual(running["title"], title)
+                    self.assertEqual(running["campaign_id"], campaign_id)
+                    self.assertEqual(self.owner.post(path, json=payload).status_code, 409)
+                    self.assertEqual([task["id"] for task in tasks() if task["status"] == "running"], [running["id"]])
+                finally:
+                    release.set()
+                response = self.read(request.result(timeout=10))
+                self.read(self.owner.post(path, json=payload))
+                model.assert_awaited_once()
+            saved = next(task for task in tasks() if task["id"] == running["id"])
+            self.assertEqual(saved["status"], "completed")
+            self.assertEqual(saved["campaign_id"], response["id"])
+            return response
+
+        generation = {"request_id": str(uuid4()), "goal": "团建咨询", "audience": "企业行政", "channel": "小红书"}
+        with patch("src.marketing.build_marketing_agent"):
+            campaign = finish_blocked_request(api + "/generate", generation, "生成营销文案", None, draft)
+            path = api + "/" + campaign["id"]
+            self.read(self.owner.post(path + "/actions", json={"action": "approve"}))
+            self.read(self.owner.post(path + "/actions", json={"action": "publish"}))
+            analysis = {"request_id": str(uuid4())}
+            with patch("src.marketing.run_structured", new=AsyncMock(side_effect=AgentOutputError("raw-model-error"))):
+                self.assertEqual(self.owner.post(path + "/analyze", json=analysis).status_code, 502)
+            failed, = [task for task in tasks() if task["status"] == "failed"]
+            self.assertEqual(failed["title"], "生成营销复盘")
+            self.assertTrue(failed["detail"])
+            self.assertNotIn("raw-model-error", failed["detail"])
+            finish_blocked_request(path + "/analyze", analysis, "生成营销复盘", campaign["id"], review)
+        self.assertCountEqual([task["status"] for task in tasks()], ["completed", "completed", "failed"])
 
     def test_missing_or_whitespace_owner_password_does_not_allow_login(self):
         for password in ("", "   "):

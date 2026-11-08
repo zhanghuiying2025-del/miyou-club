@@ -6,7 +6,7 @@ from fastapi import Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from src import company_store, history_archive, history_search, operations, performance, storage
+from src import company_store, history_archive, history_search, marketing, operations, performance, storage
 from src.agents import AgentConfigurationError, AgentOutputError
 
 
@@ -34,7 +34,7 @@ class Operation(BaseModel):
 
 
 def marketing_view(customer_id):
-    campaigns = company_store.list_records("campaign")
+    campaigns = operations.list_campaigns()
     policies = company_store.list_records("coupon_policy")
     return {
         "campaigns": [{"id": item["id"], "title": item["title"], "content": item["content"]}
@@ -46,6 +46,40 @@ def marketing_view(customer_id):
 
 def register_owner_features(app, require_owner):
     protected = [Depends(require_owner)]
+
+    @app.exception_handler(marketing.MarketingNotFound)
+    async def marketing_not_found(_request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=404)
+
+    @app.get("/api/owner/marketing/summary", dependencies=protected)
+    def marketing_summary():
+        return marketing.summary()
+
+    @app.post("/api/owner/marketing/generate", dependencies=protected)
+    def generate_campaign(payload: marketing.GenerateCampaign):
+        try:
+            return asyncio.run(marketing.generate(payload))
+        except (AgentConfigurationError, AgentOutputError) as exc:
+            raise HTTPException(502, "营销文案未生成。请检查模型服务后重试。") from exc
+
+    @app.post("/api/owner/marketing/{campaign_id}/actions", dependencies=protected)
+    def campaign_action(campaign_id: str, payload: marketing.CampaignAction):
+        return marketing.act(campaign_id, payload)
+
+    @app.post("/api/owner/marketing/{campaign_id}/delete", dependencies=protected)
+    def delete_campaign(campaign_id: str):
+        return marketing.delete_campaign(campaign_id)
+
+    @app.post("/api/owner/marketing/{campaign_id}/metrics", dependencies=protected)
+    def campaign_metrics(campaign_id: str, payload: marketing.CampaignMetrics):
+        return marketing.save_metrics(campaign_id, payload)
+
+    @app.post("/api/owner/marketing/{campaign_id}/analyze", dependencies=protected)
+    def analyze_campaign(campaign_id: str, payload: marketing.AnalyzeCampaign | None = None):
+        try:
+            return asyncio.run(marketing.analyze(campaign_id, payload))
+        except (AgentConfigurationError, AgentOutputError) as exc:
+            raise HTTPException(502, "营销复盘未生成。请检查模型服务后重试。") from exc
 
     @app.get("/api/owner/archive", dependencies=protected)
     def archive():
@@ -109,7 +143,8 @@ def register_owner_features(app, require_owner):
     def operations_view():
         return {
             **{kind: company_store.list_records(kind) for kind in
-               ("research", "campaign", "lead", "coupon_policy", "coupon")},
+               ("research", "lead", "coupon_policy", "coupon")},
+            "campaign": operations.list_campaigns(),
             "summary": operations.operating_summary(),
         }
 

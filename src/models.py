@@ -697,6 +697,7 @@ class TravelCase(BaseModel):
     supplement_origin: CaseStatus | None = None
     id: str = Field(default_factory=lambda: new_id("case"))
     web_customer_id: str | None = None
+    marketing_campaign_id: str | None = None
     status: CaseStatus = CaseStatus.NEW
     customer_request: str
     requirements: RequirementSpec | None = None

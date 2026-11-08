@@ -18,6 +18,7 @@ from src import document_intake, operations, storage, supplier_simulation as sup
 from src.activity_review import read_activity_documents, report_markdown
 from src import web_flow as flow
 from src.company_store import SimulationConflict
+from src.marketing import list_tasks as list_marketing_tasks, resolve_attribution
 from src.models import CaseStatus, TravelCase
 from src.multimodal import MAX_DOCX_BYTES, validate_attachment
 from src.order_labels import case_number
@@ -145,6 +146,8 @@ def create_app(frontend=FRONTEND):
             case = flow.TravelAgencyWorkflow(None).create_case(req.model_dump_json())
             case.id, case.web_customer_id = case_id, customer
             case.status, case.requirements = CaseStatus.WAITING_REQUIREMENTS, req
+            if payload.utm_campaign and payload.utm_source:
+                case.marketing_campaign_id = resolve_attribution(payload.utm_campaign, payload.utm_source)
             storage.save_case_to_disk(case)
             flow.start_planning(case, attachments)
             return flow.activity_view(storage.load_case_from_disk(case.id))
@@ -236,7 +239,7 @@ def create_app(frontend=FRONTEND):
 
     @app.get("/api/owner/dashboard", dependencies=[Depends(require_owner)])
     def dashboard():
-        snapshot = load_owner_dashboard(activity_tracking=True)
+        snapshot = load_owner_dashboard(activity_tracking=True, extra_tasks=list_marketing_tasks())
         return {**snapshot, "policy": CompanyPolicy().model_dump(mode="json")}
 
     def owner_order(key):

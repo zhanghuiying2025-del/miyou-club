@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { api, money, useResource } from '../../shared/api.js';
 import { Archive, Exceptions, Lessons, Operations, OrderExtras, problemText, taskStep } from './Features.jsx';
-import { formatMarketingDate, initialMarketing, marketingRate } from './MarketingCampaigns.jsx';
+import { campaignHref, formatMarketingDate, marketingRate } from './MarketingCampaigns.jsx';
 import './connected.css';
 
 const navigation = [
@@ -23,15 +23,19 @@ const actionLabels = {
   hold_incident: '暂不批准，保持暂停', reopen_incident: '重新核查暂停事件',
 };
 const taskLabels = { running: '进行中', completed: '已完成', failed: '失败', interrupted: '中断' };
+const taskResultLabels = { ...taskLabels, completed: '成功' };
+const taskResultClasses = { completed: 'green', failed: 'team-failed' };
 const exception = task => ['failed', 'interrupted'].includes(task.status);
+const marketingTask = task => task.kind === 'marketing';
+const activeMarketing = task => marketingTask(task) && task.status === 'running';
 const orderPath = key => '/owner/orders/' + encodeURIComponent(key);
 const orderHref = key => '#/orders/' + encodeURIComponent(key);
-const marketingHref = '#/operations/campaigns';
 
 function readPage() {
   try {
-    const [section, key] = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
-    return { section, key: section === 'orders' ? key : null, tab: section === 'operations' ? key : undefined };
+    const [section, key, detail] = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+    return { section, key: section === 'orders' ? key : null, tab: section === 'operations' ? key : undefined,
+      campaignId: section === 'operations' && key === 'campaigns' ? detail : undefined };
   } catch {
     return { section: '', key: null };
   }
@@ -41,8 +45,9 @@ export function App() {
   const [page, setPage] = useState(readPage);
   const [session, setSession] = useState(0);
   const [mobile, setMobile] = useState(false);
-  const [marketing, setMarketing] = useState(initialMarketing);
   const dashboard = useResource('/owner/dashboard?session=' + session, api, 2500);
+  const showMarketing = dashboard.data && (page.section === '' || page.section === 'operations' && page.tab === 'campaigns');
+  const marketing = useResource(showMarketing ? '/owner/marketing/summary?session=' + session : null, api, 10000);
   useEffect(() => {
     function navigate() { setPage(readPage()); setMobile(false); }
     window.addEventListener('hashchange', navigate);
@@ -52,7 +57,7 @@ export function App() {
   if (dashboard.error?.status === 401) return <Login onLogin={() => setSession(value => value + 1)} />;
   const data = dashboard.data;
   const pending = data?.orders.filter(order => order.needs_owner) || [];
-  const problems = data?.tasks.filter(exception) || [];
+  const problems = data?.tasks.filter(task => !marketingTask(task) && exception(task)) || [];
   const title = page.key ? '订单详情' : navigation.find(([section]) => section === page.section)?.[1]
     || ({ errors: '运行异常', logs: '工作日志', notifications: '消息中心', settings: '工作台设置' })[page.section];
 
@@ -72,7 +77,7 @@ export function App() {
       <header className="topbar">
         <button className="icon-btn mobile-menu" onClick={() => setMobile(true)} aria-label="打开导航"><Menu /></button>
         <div className="topbar-right">
-          <button className="icon-btn" onClick={dashboard.refresh} aria-label="刷新"><RefreshCw size={20} /></button>
+          <button className="icon-btn" onClick={() => { dashboard.refresh(); marketing.refresh(); }} aria-label="刷新"><RefreshCw size={20} /></button>
           <a className="icon-btn" href="#/notifications" aria-label="消息中心"><Bell size={22} /></a>
           <a className="btn outline small" href="/">打开用户端</a>
         </div>
@@ -89,7 +94,7 @@ export function App() {
           {page.section === 'errors' && <Exceptions tasks={problems} orders={data.orders} />}
           {page.section === 'archive' && <Archive />}
           {page.section === 'lessons' && <Lessons />}
-          {page.section === 'operations' && <Operations activeTab={page.tab} marketing={marketing} setMarketing={setMarketing} />}
+          {page.section === 'operations' && <Operations activeTab={page.tab} campaignId={page.campaignId} marketing={marketing} />}
           {page.section === 'review' && <Review data={data} />}
           {page.section === 'rules' && <div className="fact-grid">
             <Fact label="重大风险需要老板审批" value={data.policy.high_risk_requires_owner ? '启用' : '关闭'} />
@@ -98,10 +103,7 @@ export function App() {
           </div>}
           {page.section === 'logs' && <TaskList rows={data.tasks} empty="目前还没有任务记录。" />}
           {page.section === 'notifications' && <OrderList rows={pending} empty="当前没有待办通知。" />}
-          {page.section === 'settings' && <Settings onLogout={() => {
-            setMarketing(initialMarketing);
-            setSession(value => value + 1);
-          }} />}
+          {page.section === 'settings' && <Settings onLogout={() => setSession(value => value + 1)} />}
         </section>)}
       <footer className="workspace-footer"><a href="#/logs">工作日志</a><span>咪游社 Miyou Club</span></footer>
     </main>
@@ -145,8 +147,9 @@ function Overview({ data, pending, problems, marketing }) {
     ['订单与风险', data.orders.length, '查看从需求到交付的进度', 'orders', TriangleAlert, 'intervention-card'],
     ['待处理异常', problems.filter(task => !task.recovered).length, '查看失败或中断的工作', 'errors', CircleX, 'error-card'],
   ];
-  const recentTasks = data.tasks.filter(task => task.status === 'completed' || task.status === 'failed')
-    .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0)).slice(0, 5);
+  const recentTasks = data.tasks.filter(task => task.status === 'completed' || task.status === 'failed' || activeMarketing(task))
+    .sort((a, b) => Number(activeMarketing(b)) - Number(activeMarketing(a)) ||
+      (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0)).slice(0, 5);
   return <>
     <section className="hero">
       <div className="greeting"><img className="mascot" src={import.meta.env.BASE_URL + 'assets/miyou-robot.png'} alt="咪游机器人" />
@@ -166,12 +169,12 @@ function Overview({ data, pending, problems, marketing }) {
         <section className="panel connected-page">
           <h2>团队最近动态</h2>
           {recentTasks.length ? <ul className="team-summary">{recentTasks.map((task, index) =>
-            <li key={task.order_key + ':' + index}>
+            <li key={marketingTask(task) ? task.id : task.order_key + ':' + index}>
               <strong>{task.actor} · {taskStep(task) || task.title}</strong>
-              <span className={'tag ' + (task.status === 'completed' ? 'green' : 'team-failed')}>
-                {task.status === 'completed' ? '成功' : '失败'}
+              <span className={'tag ' + (taskResultClasses[task.status] || 'neutral')}>
+                {taskResultLabels[task.status]}
               </span>
-            </li>)}</ul> : <p className="muted">暂无已完成或失败的任务。</p>}
+            </li>)}</ul> : <p className="muted">暂无团队任务动态。</p>}
           <div className="dashboard-card-footer"><a className="btn primary" href="#/team">查看团队动态 <ArrowRight size={16} aria-hidden="true" /></a></div>
         </section>
       </div>
@@ -183,7 +186,7 @@ function AcquisitionOverview({ marketing }) {
   let inquiries = 0;
   let paid = 0;
   let latest;
-  for (const campaign of marketing) {
+  for (const campaign of marketing.data?.campaigns ?? []) {
     if (campaign.status !== 'published') continue;
     inquiries += campaign.stages.inquiries;
     paid += campaign.stages.paid;
@@ -193,8 +196,10 @@ function AcquisitionOverview({ marketing }) {
   }
 
   return <section className="panel connected-page acquisition-overview">
-    <div className="marketing-heading"><h2>获客概览</h2><span className="tag neutral">演示数据</span></div>
-    <div className="acquisition-columns">
+    <div className="marketing-heading"><h2>获客概览</h2></div>
+    {marketing.error && <p className="connected-alert" role="alert">{marketing.error.message}</p>}
+    {!marketing.data && !marketing.error && <p role="status">正在读取获客数据…</p>}
+    {marketing.data && <div className="acquisition-columns">
       <section>
         <h3>站内转化</h3><p className="marketing-muted">推广链接归因 · 发布以来</p>
         <dl className="acquisition-metrics">
@@ -211,8 +216,8 @@ function AcquisitionOverview({ marketing }) {
             {' · 统计至 '}{formatMarketingDate(latest.metric.date)}</p>
         </div> : <p className="marketing-muted acquisition-recent">暂无站外记录</p>}
       </section>
-    </div>
-    <div className="dashboard-card-footer"><a className="btn primary" href={marketingHref}>查看获客活动 <ArrowRight size={16} aria-hidden="true" /></a></div>
+    </div>}
+    <div className="dashboard-card-footer"><a className="btn primary" href={campaignHref()}>查看获客活动 <ArrowRight size={16} aria-hidden="true" /></a></div>
   </section>;
 }
 
@@ -232,11 +237,18 @@ function OrderList({ rows, search = false, empty }) {
 
 function TaskList({ rows, empty }) {
   return rows.length ? <ul className="connected-tasks">{rows.map((task, index) => {
+    const time = task.created_at && new Date(task.created_at).toLocaleString('zh-CN', { hour12: false });
+    if (marketingTask(task)) return <li key={task.id}>
+      <a href={campaignHref(task.campaign_id)}><strong>{task.actor} · {task.title}</strong></a>
+      <span className={'tag ' + (taskResultClasses[task.status] || 'neutral')}>{taskResultLabels[task.status]}</span>
+      <p>{[task.campaign_title, time].filter(Boolean).join(' · ')}</p>
+      {task.detail && <p>{task.detail}</p>}
+    </li>;
     const problem = exception(task);
     return <li key={task.order_key + ':' + index}>
       <a href={orderHref(task.order_key)}><strong>{task.actor} · {taskStep(task) || task.title}</strong></a>
       <span className="tag neutral">{task.recovered ? '已恢复 · 历史异常' : taskLabels[task.status] || task.status}</span>
-      <p>{task.order_title}{task.created_at && ' · ' + new Date(task.created_at).toLocaleString('zh-CN', { hour12: false })}</p>
+      <p>{task.order_title}{time && ' · ' + time}</p>
       {problem ? <>
         <p>{problemText(task).reason}</p>
         {task.detail && <details><summary>查看技术记录</summary><p>{task.title} · {task.detail}</p></details>}

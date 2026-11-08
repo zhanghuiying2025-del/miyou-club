@@ -241,7 +241,7 @@ function OperationForm({ title, fields, action, busy, save, button = '保存' })
 
 const operationTabs = { ledger: '经营记录', research: '市场调研', campaigns: '获客活动', coupons: '优惠券' };
 
-export function Operations({ activeTab, marketing, setMarketing }) {
+export function Operations({ activeTab, campaignId, marketing }) {
   const { data, error, refresh } = useResource('/owner/operations');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -262,7 +262,7 @@ export function Operations({ activeTab, marketing, setMarketing }) {
     <nav className="connected-actions operations-tabs" aria-label="公司运营">{Object.entries(operationTabs).map(([key, label]) =>
       <a className={'btn ' + (tab === key ? 'primary' : 'outline')} key={key} href={key === 'ledger' ? '#/operations' : '#/operations/' + key}
         aria-current={tab === key ? 'page' : undefined}>{label}</a>)}</nav>
-    {tab === 'campaigns' && <MarketingCampaigns marketing={marketing} setMarketing={setMarketing} />}
+    {tab === 'campaigns' && <MarketingCampaigns campaignId={campaignId} marketing={marketing} />}
     {!data && <p role={error ? 'alert' : 'status'}>{error?.message || '正在读取公司记录…'}</p>}
     {message && <p role="status">{message}</p>}
     {data && tab === 'ledger' && <><p>咨询 {data.summary.leads} 个 · 已付 {data.summary.paid_orders} 笔 · 已结清 {data.summary.completed_orders} 笔</p>
@@ -284,7 +284,7 @@ export function Operations({ activeTab, marketing, setMarketing }) {
       <OperationForm title="创建获客活动草案" fields={[[ 'title', '活动名称', 'text' ], ['audience', '面向人群', 'text'],
         ['channel', '渠道', 'text'], ['amount', '模拟预算（元）', 'money'], ['content', '活动内容', 'textarea'],
         ['research_id', '参考报告', 'text', [['', '不指定'], ...options(data.research, 'topic')]]]} action="create_campaign" busy={busy} save={save} />
-      {data.campaign.map(item => <article className="feature-card" key={item.id}><h2>{item.title}</h2>
+      {data.campaign.filter(item => !item.review_status).map(item => <article className="feature-card" key={item.id}><h2>{item.title}</h2>
         <p>{item.audience} · {item.channel} · {money(item.budget_cents)} · {item.status === 'active' ? '已启用' : '草案'}</p>
         <p>{item.content}</p>
         {item.status !== 'active' && <button className="btn primary small" disabled={busy} onClick={() => save({ action: 'activate_campaign', id: item.id })}>批准并启用</button>}

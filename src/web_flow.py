@@ -58,6 +58,14 @@ class Brief(BaseModel):
 class CreateActivity(BaseModel):
     request_id: UUID4
     brief: Brief
+    utm_campaign: str | None = None
+    utm_source: str | None = None
+
+    @field_validator("utm_campaign", "utm_source", mode="before")
+    @classmethod
+    def normalize_utm(cls, value):
+        value = value.strip() if isinstance(value, str) else ""
+        return value if re.fullmatch(r"[A-Za-z0-9_-]{1,100}", value) else None
 
 
 class Action(BaseModel):

@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from src import company_store, performance, storage, supplier_simulation
+from src import company_store, marketing, performance, storage, supplier_simulation
 from src.models import CouncilDecision, FeasibilityReview, JourneyResponse, ManagedPlan
 from src.web_api import create_app
 from test_compact_planning import checks
@@ -46,8 +46,24 @@ class WebOrderTests(unittest.TestCase):
         self.assertEqual(owner.post("/api/owner/session", json={"password": "bad"}).status_code, 401)
         self.assertEqual(owner.post("/api/owner/session", json={"password": "local-test-password"}).status_code, 200)
         self.assertEqual(customer.get("/api/customer/session").status_code, 200)
+
+        def read(response):
+            self.assertLess(response.status_code, 300, response.text)
+            return response.json()
+
+        marketing_api = "/api/owner/marketing"
+        draft = marketing.CampaignDraft(channel="小红书", title="团建预算攻略", reason="测试渠道", content="提交需求查看团建方案。")
+        with (patch("src.marketing.build_marketing_agent"),
+              patch("src.marketing.run_structured", new=AsyncMock(return_value=draft))):
+            campaign = read(owner.post(marketing_api + "/generate", json={
+                "request_id": str(uuid4()), "goal": "获取团建咨询", "audience": "企业行政", "channel": "小红书",
+            }))
+        campaign_actions = marketing_api + "/" + campaign["id"] + "/actions"
+        read(owner.post(campaign_actions, json={"action": "approve"}))
+        read(owner.post(campaign_actions, json={"action": "publish", "publication_mode": "simulation"}))
         payload = {
             "request_id": str(uuid4()),
+            "utm_campaign": campaign["id"], "utm_source": "xiaohongshu",
             "brief": {
                 "name": "React 双端验收", "people": 15, "team": "团队同事",
                 "city": "天津", "destination": "市区", "event_city": "北京",
@@ -55,10 +71,6 @@ class WebOrderTests(unittest.TestCase):
                 "duration": "1天", "budget": 700, "goals": ["增进默契"],
             },
         }
-
-        def read(response):
-            self.assertLess(response.status_code, 300, response.text)
-            return response.json()
 
         created = read(customer.post("/api/customer/activities", json=payload))
         self.assertEqual(read(customer.post("/api/customer/activities", json=payload))["id"], created["id"])
@@ -122,6 +134,8 @@ class WebOrderTests(unittest.TestCase):
         self.assertEqual(sum(response.status_code in {409, 422} for response in responses), 1)
         item = read(next(response for response in responses if response.status_code == 200))
         self.assertEqual(item["booking"]["status"], "paid")
+        campaign_stats, = read(owner.get(marketing_api + "/summary"))["campaigns"]
+        self.assertEqual(campaign_stats["stages"], {"inquiries": 1, "plans": 1, "bookings": 1, "paid": 1})
         self.assertEqual(item["booking"]["contract"]["total_cents"],
                          unpaid["booking"]["contract"]["total_cents"] - 10000)
         self.assertGreaterEqual(action(customer, path, "pay_deposit", unpaid).status_code, 400)
@@ -172,3 +186,6 @@ class WebOrderTests(unittest.TestCase):
         self.assertEqual(dashboard["supplier_cash"]["incoming_cents"], item["booking"]["contract"]["total_cents"])
         with company_store.transaction() as ledger:
             self.assertEqual(len(ledger.events("cash")), 4)
+        read(owner.post(marketing_api + "/" + campaign["id"] + "/delete", json={}))
+        self.assertEqual(read(owner.get(marketing_api + "/summary"))["campaigns"], [])
+        self.assertEqual(read(customer.get(path))["booking"], settled["booking"])

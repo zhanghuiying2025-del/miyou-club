@@ -397,7 +397,7 @@ def _supplier_results(orders, leads, campaigns, cash):
     return metrics, campaign_rows, rows
 
 
-def load_owner_dashboard(*, activity_tracking=False):
+def load_owner_dashboard(*, activity_tracking=False, extra_tasks=()):
     """Summarize real saved demo records and current jobs without changing business state."""
     saved = sorted(storage.saved_case_snapshots(), key=lambda row: row.get("updated_at", ""), reverse=True)
     cases = [TravelCase.model_validate(row["case"]) for row in saved]
@@ -405,7 +405,7 @@ def load_owner_dashboard(*, activity_tracking=False):
     travel, travel_rows = _travel_results(cases)
     supplier_metrics, campaign_rows, supplier_rows = _supplier_results(suppliers, leads, campaigns, cash)
 
-    orders, tasks = [], []
+    orders, tasks = [], list(extra_tasks)
     paid_cases, settled_cases = set(), set()
     supplier_by_id = {order.id: order for order in suppliers}
     supplier_by_case = {}

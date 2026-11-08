@@ -3,7 +3,7 @@ from datetime import date
 from hashlib import sha256
 from pydantic import BaseModel, Field
 
-from src.company_store import transaction, cash_event, finance_summary
+from src.company_store import transaction, cash_event, finance_summary, list_records
 from src.supplier_models import identifier
 
 
@@ -73,10 +73,16 @@ def create_campaign(title, audience, channel, budget_cents, content, research_id
     return record
 
 
+def list_campaigns():
+    return [campaign for campaign in list_records("campaign") if not campaign.get("deleted_at")]
+
+
 def activate_campaign(campaign_id, actor):
     owner_only(actor)
     with transaction() as tx:
         record, revision = tx.get("campaign",campaign_id)
+        if "review_status" in record:
+            raise ValueError("请在营销活动详情完成审批并确认发布")
         record["status"] = "active"
         tx.save("campaign",campaign_id,record,revision)
     return record  # A local demo entry, never an external advertisement.
@@ -144,7 +150,9 @@ def create_coupon_policy(title, face_cents, min_order_cents, valid_from, valid_u
         "audience":audience,"limit":int(limit),"campaign_id":campaign_id,"active":True,"scope":"service_fee","stackable":False}
     with transaction() as tx:
         if campaign_id:
-            tx.get("campaign",campaign_id)
+            campaign, _ = tx.get("campaign", campaign_id)
+            if campaign.get("deleted_at"):
+                raise ValueError("获客活动已删除")
         tx.save("coupon_policy",record["id"],record)
     return record
 
@@ -211,6 +219,8 @@ def operating_summary():
         completed = [o for o in orders if o["status"] == "completed"]
         rows=[]
         for campaign in campaigns:
+            if campaign.get("deleted_at"):
+                continue
             sourced=[o for o in orders if o.get("campaign_id") == campaign["id"]]
             lead_count=sum(l.get("campaign_id") == campaign["id"] for l in leads)
             paid=[o for o in sourced if o["customer_paid_cents"] > 0]

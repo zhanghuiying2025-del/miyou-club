@@ -135,11 +135,23 @@ function Dialog({ title, children, onClose, actions }) {
 function NotFound({ onStart }) {
   return <div className="inner-page"><Header onStart={onStart} /><main className="empty-state not-found"><img src={ROBOT} alt="咪游" /><h1>这个活动，好像不在这里。</h1><p>试试从“我的活动”找回来。</p><Link to="/activities" className="button">去我的活动 <ArrowRight size={19} /></Link></main></div>;
 }
+
+function readLandingAttribution() {
+  const params = new URLSearchParams(window.location.search);
+  const campaign = params.get('utm_campaign')?.trim() ?? '';
+  const source = params.get('utm_source')?.trim() ?? '';
+  const token = /^[A-Za-z0-9_-]{1,100}$/;
+  return token.test(campaign) && token.test(source)
+    ? { utm_campaign: campaign, utm_source: source } : null;
+}
+
 export function App() {
   const route = useRoute();
   const [draft, setDraft] = useState(readDraft);
-  const [brief, setBrief] = useState(() => ({ ...blankBrief(), ...readDraft()?.brief }));
-  const [requestId, setRequestId] = useState(() => readDraft()?.requestId || crypto.randomUUID());
+  const [brief, setBrief] = useState(() => ({ ...blankBrief(), ...draft?.brief }));
+  const [requestId, setRequestId] = useState(() => draft?.requestId || crypto.randomUUID());
+  const landingAttribution = useRef(readLandingAttribution());
+  const draftAttribution = useRef(draft?.attribution ?? null);
   const [dialog, setDialog] = useState(null);
   const [storageError, setStorageError] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -150,7 +162,10 @@ export function App() {
   const activityMatch = route.match(/^\/(workspace|activities)\/([^/]+)(?:\/plans(?:\/([^/]+))?)?$/);
 
   function persist(nextBrief, nextStep, id = requestId) {
-    const next = { brief: nextBrief, step: nextStep, requestId: id };
+    // Bind the landing link to one draft and keep that source through retries and reloads.
+    draftAttribution.current ??= landingAttribution.current;
+    landingAttribution.current = null;
+    const next = { brief: nextBrief, step: nextStep, requestId: id, attribution: draftAttribution.current };
     setDraft(next);
     setStorageError(!saveDraft(next));
   }
@@ -179,6 +194,7 @@ export function App() {
     setBrief(next);
     setFiles([]);
     setRequestId(id);
+    draftAttribution.current = null;
     persist(next, 1, id);
     setDialog(null);
     navigate('/create/1');
@@ -205,7 +221,8 @@ export function App() {
     setSubmitting(true);
     setSubmitError('');
     try {
-      const payload = { request_id: requestId, brief: { ...brief, name: brief.name.trim() || '未命名团建',
+      const payload = { request_id: requestId, utm_campaign: draftAttribution.current?.utm_campaign,
+        utm_source: draftAttribution.current?.utm_source, brief: { ...brief, name: brief.name.trim() || '未命名团建',
         event_city: brief.eventCity.trim() || brief.city.trim(), people: Number(brief.people), budget: Number(brief.budget) } };
       if (files.length > 3) throw new Error('最多上传 3 份参考附件。');
       let body = payload;
@@ -215,6 +232,7 @@ export function App() {
         files.forEach(file => body.append('files', file));
       }
       const activity = await customerApi('/customer/activities' + (files.length ? '/with-files' : ''), { body });
+      draftAttribution.current = null;
       setDraft(null);
       setStorageError(!saveDraft(null));
       setBrief(blankBrief());

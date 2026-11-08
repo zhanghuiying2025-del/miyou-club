@@ -16,10 +16,14 @@ class Records:
         self.connection = connection
 
     def get(self, kind, key):
-        row = self.connection.execute("SELECT payload,revision FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
-        if row is None:
+        record = self.find(kind, key)
+        if record is None:
             raise ValueError("记录不存在，请刷新页面")
-        return json.loads(row[0]), row[1]
+        return record
+
+    def find(self, kind, key):
+        row = self.connection.execute("SELECT payload,revision FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
+        return (json.loads(row[0]), row[1]) if row else None
 
     def all(self, kind):
         return [json.loads(row[0]) for row in self.connection.execute(
