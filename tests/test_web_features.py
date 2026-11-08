@@ -27,6 +27,21 @@ from test_style_request_flow import TEAM, brief
 from test_supplier_operations import need
 
 
+def acquisition_plan():
+    return marketing.ReviewDraft(
+        title="下一轮获客计划", body="小红书已获得首批咨询", limitations="目前样本较少",
+        next_goal="在企业社群用案例获得新咨询", next_channel="企业社群",
+        actions={
+            "acquisition": {"what": "在现有企业社群分享团建案例和专属链接", "owner": "老板",
+                            "success_metric": "本周新增 3 条社群有效咨询"},
+            "follow_up": {"what": "查看已提交需求的方案进度并处理待确认事项", "owner": "老板",
+                          "success_metric": "本周至少推进 1 条咨询至确认方案"},
+            "operations": {"what": "每周按渠道汇总有效咨询和方案确认数", "owner": "营销 Agent",
+                           "success_metric": "下周复盘时列出每个渠道的有效咨询与确认方案数"},
+        },
+    )
+
+
 class WebFeatureTests(unittest.TestCase):
     def setUp(self):
         directory = self.enterContext(TemporaryDirectory())
@@ -62,8 +77,7 @@ class WebFeatureTests(unittest.TestCase):
     def test_marketing_approval_attribution_metrics_and_review(self):
         api = "/api/owner/marketing"
         draft = marketing.CampaignDraft(channel="小红书", title="团建预算攻略", reason="面向团建负责人", content="填写团建需求，查看方案。")
-        review = marketing.ReviewDraft(title="补充报价流程", body="测试文末引导", limitations="样本很少",
-                                       next_goal="解释如何查看报价", next_channel="小红书")
+        review = acquisition_plan()
         generation = {"request_id": str(uuid4()), "goal": "获取团建咨询", "audience": "企业行政", "channel": "由 Agent 推荐"}
         brief_payload = {
             "request_id": str(uuid4()), "utm_source": "xiaohongshu",
@@ -122,8 +136,13 @@ class WebFeatureTests(unittest.TestCase):
             self.assertEqual(self.owner.post(path + "/metrics", json={"date": stats_date, "views": -1}).status_code, 422)
             analyzed = self.read(self.owner.post(path + "/analyze", json={}))
             self.assertEqual(analyzed["review"]["next_goal"], review.next_goal)
+            self.assertEqual(analyzed["review"]["next_channel"], "企业社群")
+            self.assertEqual(analyzed["review"]["actions"], review.model_dump()["actions"])
+            self.assertEqual(analyzed["review"]["snapshot"]["followUpStages"], {"待补充团建需求": 2})
             self.assertEqual(analyzed["stages"], {"inquiries": 2, "plans": 0, "bookings": 0, "paid": 0})
             self.assertNotIn("客户自填的活动名", str(model.await_args))
+            self.assertNotIn(activity["id"], str(model.await_args))
+            self.assertEqual({item["id"] for item in analyzed["review"]["followups"]}, {activity["id"], attached["id"]})
             self.read(self.owner.post(path + "/metrics", json={"date": stats_date, "views": 100, "likes": 0}))
             reopened = TestClient(create_app())
             self.read(reopened.post("/api/owner/session", json={"password": "local-test-password"}))
@@ -136,7 +155,7 @@ class WebFeatureTests(unittest.TestCase):
 
             tasks = [task for task in self.read(reopened.get("/api/owner/dashboard"))["tasks"] if task.get("kind") == "marketing"]
             self.assertCountEqual([(task["title"], task["status"]) for task in tasks], [
-                ("生成营销文案", "failed"), ("生成营销文案", "completed"), ("生成营销复盘", "completed"),
+                ("生成营销文案", "failed"), ("生成营销文案", "completed"), ("生成获客计划", "completed"),
             ])
             self.assertTrue(all(task["campaign_id"] == campaign["id"] for task in tasks if task["status"] == "completed"))
 
@@ -156,8 +175,7 @@ class WebFeatureTests(unittest.TestCase):
     def test_marketing_tasks_show_running_and_record_each_retry(self):
         api = "/api/owner/marketing"
         draft = marketing.CampaignDraft(channel="小红书", title="团建推广", reason="目标客群", content="提交团建需求。")
-        review = marketing.ReviewDraft(title="记录咨询", body="先收集咨询", limitations="暂时没有样本",
-                                       next_goal="补充说明", next_channel="小红书")
+        review = acquisition_plan()
         owner_tab = TestClient(self.owner.app, cookies=dict(self.owner.cookies))
 
         def tasks():
@@ -203,10 +221,10 @@ class WebFeatureTests(unittest.TestCase):
             with patch("src.marketing.run_structured", new=AsyncMock(side_effect=AgentOutputError("raw-model-error"))):
                 self.assertEqual(self.owner.post(path + "/analyze", json=analysis).status_code, 502)
             failed, = [task for task in tasks() if task["status"] == "failed"]
-            self.assertEqual(failed["title"], "生成营销复盘")
+            self.assertEqual(failed["title"], "生成获客计划")
             self.assertTrue(failed["detail"])
             self.assertNotIn("raw-model-error", failed["detail"])
-            finish_blocked_request(path + "/analyze", analysis, "生成营销复盘", campaign["id"], review)
+            finish_blocked_request(path + "/analyze", analysis, "生成获客计划", campaign["id"], review)
         self.assertCountEqual([task["status"] for task in tasks()], ["completed", "completed", "failed"])
 
     def test_missing_or_whitespace_owner_password_does_not_allow_login(self):

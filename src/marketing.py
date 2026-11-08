@@ -1,7 +1,7 @@
 """Owner-managed campaigns and attribution to existing team-building cases."""
 
 from asyncio import CancelledError
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 import json
@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, UUID4
 from src import storage
 from src.agents import AgentConfigurationError, AgentOutputError, build_marketing_agent, run_structured
 from src.company_store import SimulationConflict, transaction
+from src.models import CaseStatus
 
 
 CHANNELS = {"小红书": "xiaohongshu", "微信朋友圈": "wechat_moments", "企业社群": "enterprise_group"}
@@ -21,8 +22,24 @@ RECOMMEND_CHANNEL = "由 Agent 推荐"
 STAGES = {"inquiries": "有效咨询", "plans": "确认方案", "bookings": "创建预订", "paid": "模拟已付"}
 PLATFORM_METRICS = {"views": "累计浏览", "likes": "累计点赞", "comments": "累计评论"}
 SHANGHAI = timezone(timedelta(hours=8))
-TASK_TITLES = {"generate": "生成营销文案", "analyze": "生成营销复盘"}
+TASK_TITLES = {"generate": "生成营销文案", "analyze": "生成获客计划"}
 TASK_LEASE = timedelta(minutes=5)
+FOLLOW_UP_LIMIT = 5
+CASE_FOLLOW_UP_STAGES = {
+    CaseStatus.WAITING_REQUIREMENTS: "待补充团建需求",
+    CaseStatus.WAITING_CUSTOMER: "待客户补充信息",
+    CaseStatus.WAITING_STYLE_FEEDBACK: "待客户确认方向",
+    CaseStatus.WAITING_DRAFT: "待客户确认草案",
+    CaseStatus.READY_FOR_CUSTOMER: "待客户确认方案",
+    CaseStatus.WAITING_OWNER: "待老板处理方案审批",
+    CaseStatus.NEEDS_REWORK: "待重新策划",
+    CaseStatus.FAILED: "方案生成待排查",
+    CaseStatus.COMPLETED: "方案已确认，待下单",
+}
+BOOKING_FOLLOW_UP_STAGES = {
+    "waiting_customer": "待客户确认模拟报价",
+    "customer_confirmed": "待客户支付模拟预付款",
+}
 
 ShortText = Annotated[str, Field(min_length=1, max_length=150)]
 MetricCount = Annotated[int, Field(strict=True, ge=0, le=2**53 - 1)]
@@ -66,12 +83,33 @@ class CampaignDraft(BaseModel):
     content: Annotated[str, Field(min_length=1, max_length=3000)]
 
 
+class AcquisitionAction(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    what: Annotated[str, Field(min_length=1, max_length=400)]
+    owner: Literal["老板", "营销 Agent"]
+    success_metric: Annotated[str, Field(min_length=1, max_length=300)]
+
+
+class FollowUpAction(AcquisitionAction):
+    owner: Literal["老板"]
+
+
+class AcquisitionActions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    acquisition: AcquisitionAction
+    follow_up: FollowUpAction
+    operations: AcquisitionAction
+
+
 class ReviewDraft(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     title: ShortText
     body: Annotated[str, Field(min_length=1, max_length=1200)]
     limitations: Annotated[str, Field(min_length=1, max_length=500)]
+    actions: AcquisitionActions
     next_goal: ShortText
     next_channel: ShortText
 
@@ -105,17 +143,20 @@ def resolve_attribution(campaign_id, source):
     return None
 
 
-def _funnels(cases, orders, campaign_ids):
-    counts = {key: dict.fromkeys(STAGES, 0) for key in campaign_ids}
-    bookings = set()
+def _booking_progress(orders):
+    bookings = {}
     paid = set()
     for order in orders:
         case_id = order.get("case_id")
         if case_id and order["status"] != "cancelled":
-            bookings.add(case_id)
+            bookings.setdefault(case_id, order["status"])
             if order.get("customer_paid_cents", 0) > 0:
                 paid.add(case_id)
+    return bookings, paid
 
+
+def _funnels(cases, bookings, paid, campaign_ids):
+    counts = {key: dict.fromkeys(STAGES, 0) for key in campaign_ids}
     for snapshot in cases:
         case = snapshot["case"]
         stages = counts.get(case.get("marketing_campaign_id"))
@@ -127,6 +168,28 @@ def _funnels(cases, orders, campaign_ids):
         stages["bookings"] += case["id"] in bookings
         stages["paid"] += case["id"] in paid
     return counts
+
+
+def _followup_context(cases, bookings, paid, campaign_id):
+    attributed = (row for row in cases if row["case"].get("marketing_campaign_id") == campaign_id)
+    counts, followups = Counter(), []
+    for row in sorted(attributed, key=lambda item: item.get("updated_at", ""), reverse=True):
+        case = row["case"]
+        case_id = case["id"]
+        booking = bookings.get(case_id)
+        if case_id in paid or booking in {"paid", "confirmed", "delivered", "completed"}:
+            continue
+        status = case.get("status")
+        approval = case.get("approval") or {}
+        if status == CaseStatus.FAILED and approval.get("approved") is False and not case.get("resume_status"):
+            continue
+        stage = (BOOKING_FOLLOW_UP_STAGES.get(booking, "模拟报价准备中") if booking else
+                 CASE_FOLLOW_UP_STAGES.get(status, "方案准备中"))
+        counts[stage] += 1
+        if len(followups) < FOLLOW_UP_LIMIT:
+            title = (case.get("requirements") or {}).get("event_name") or "团建需求"
+            followups.append({"id": case_id, "title": title, "stage": stage})
+    return dict(counts), followups
 
 
 def _view(campaign, stages, metrics):
@@ -144,7 +207,7 @@ def _view(campaign, stages, metrics):
     }
 
 
-def _campaign_views(campaign_id=None):
+def _campaign_views(campaign_id=None, *, include_followups=False):
     with transaction() as tx:
         if campaign_id is None:
             campaigns = [item for item in tx.all("campaign") if "review_status" in item and not item.get("deleted_at")]
@@ -154,12 +217,17 @@ def _campaign_views(campaign_id=None):
         orders = tx.all("supplier_order") if campaign_ids else []
         snapshots = tx.all("campaign_metric") if campaign_ids else []
     cases = storage.saved_case_snapshots() if campaign_ids else []
-    funnels = _funnels(cases, orders, campaign_ids)
+    bookings, paid = _booking_progress(orders)
+    funnels = _funnels(cases, bookings, paid, campaign_ids)
     metrics = defaultdict(list)
     for entry in snapshots:
         if entry["campaign_id"] in campaign_ids:
             metrics[entry["campaign_id"]].append({key: value for key, value in entry.items() if key != "campaign_id"})
-    return [_view(item, funnels.get(item["id"], dict.fromkeys(STAGES, 0)), metrics[item["id"]]) for item in campaigns]
+    views = [_view(item, funnels.get(item["id"], dict.fromkeys(STAGES, 0)), metrics[item["id"]]) for item in campaigns]
+    if include_followups:
+        counts, followups = _followup_context(cases, bookings, paid, campaign_id)
+        views[0].update(followup_stages=counts, followups=followups)
+    return views
 
 
 def summary():
@@ -180,7 +248,7 @@ def delete_campaign(campaign_id):
             tx.save("campaign", campaign_id, campaign, revision)
             for task in tx.all("marketing_task"):
                 if task["campaign_id"] == campaign_id and task["status"] == "running":
-                    _set_task_result(tx, task, "failed", "营销活动已删除，复盘任务已结束。")
+                    _set_task_result(tx, task, "failed", "营销活动已删除，获客计划任务已结束。")
     return {"id": campaign_id}
 
 
@@ -325,9 +393,9 @@ def save_metrics(campaign_id, payload):
 
 async def analyze(campaign_id, payload=None):
     captured_at = datetime.now(timezone.utc)
-    campaign = _campaign_views(campaign_id)[0]
+    campaign = _campaign_views(campaign_id, include_followups=True)[0]
     if campaign["status"] != "published":
-        raise SimulationConflict("活动发布后可生成复盘。")
+        raise SimulationConflict("活动发布后可生成下一轮获客计划。")
     request_id = payload.request_id if payload is not None and payload.request_id else uuid4()
     with transaction() as tx:
         _campaign(tx, campaign_id)
@@ -352,17 +420,32 @@ async def _build_review(campaign, captured_at):
     stages = campaign["stages"]
     latest = max(campaign["metrics"], key=lambda metric: metric["date"], default=None)
     rate = stages["paid"] / stages["inquiries"] if stages["inquiries"] else None
+    followup_stages = campaign["followup_stages"]
     snapshot = {
-        "asOf": captured_at.isoformat(), "stages": stages, "conversionRate": rate, "platform": latest,
+        "asOf": captured_at.isoformat(), "stages": stages, "conversionRate": rate,
+        "platform": latest, "followUpStages": followup_stages,
     }
-    task = {"campaign": {key: campaign[key] for key in ("channel", "title", "goal")}, "snapshot": snapshot}
+    channels = list(dict.fromkeys([campaign["channel"], *CHANNELS]))
+    task = {
+        "campaign": {key: campaign[key] for key in ("channel", "goal", "audience")},
+        "snapshot": snapshot, "allowed_channels": channels,
+    }
     draft = await run_structured(build_marketing_agent(),
-        "复盘一项获客活动。站内数据按案件去重，付费为模拟付款。站外累计数据为老板手录，"
-        "null表示未录入或无法计算，不是零。根据汇总数据提出一项下轮测试，沿用原渠道，写清比较什么指标。"
-        "没有有效咨询时建议先收集数据。区分观察和推断，说明样本量和可比性。数字依据由系统单独展示。\n"
+        "根据汇总数据制定下一轮获客计划。站内数据按案件去重，付费是模拟付款。"
+        "站外累计数据为老板手录，null表示未录入或无法计算，不是零。"
+        "body说明获客或推进主要卡在哪里，limitations说明样本量、缺失数据和可比性。"
+        "acquisition写明去哪找什么样的新客户、用什么内容切入、如何通过独立推广链接统计有效咨询。"
+        "follow_up由老板负责，根据待跟进阶段决定下一步，例如查看方案进度、澄清需求或推进报价确认。"
+        "没有待跟进案件时，制定收到首条咨询后的接续动作。"
+        "operations给出持续经营的执行节奏、下次检查的时间或条件，以及届时根据什么结果继续或调整。"
+        "每项what写具体动作，owner写负责人，success_metric写可核验结果。营销 Agent由老板手动触发来准备内容或整理数据，"
+        "对外发布、联系客户和经营决策由老板执行。经营节奏是待老板执行的建议。若建议数量目标，明确标为下轮目标。"
+        "验收使用有效咨询、方案确认、创建预订、模拟已付、已录入站外指标或可核对的任务完成情况。"
+        "现有数据没有点击统计，勿用点击转化率。不得编造渠道效果或客户情况。"
+        "next_goal是找新客户行动可带入创建表单的目标，next_channel从候选渠道中选择。\n"
         + json.dumps(task, ensure_ascii=False), ReviewDraft)
-    if draft.next_channel != campaign["channel"]:
-        raise AgentOutputError("模型返回的复盘渠道与原活动不一致，请重新生成。")
+    if draft.next_channel not in channels:
+        raise AgentOutputError("模型返回了候选范围外的获客渠道，请重新生成。")
 
     evidence = " · ".join(f"{label} {stages[key]}" for key, label in STAGES.items())
     if latest:
@@ -371,7 +454,11 @@ async def _build_review(campaign, captured_at):
         evidence += f"。站外数据统计至 {latest['date']}：{platform}。"
     else:
         evidence += "。站外数据未录入。"
+    if followup_stages:
+        stages_text = " · ".join(f"{stage} {count}" for stage, count in followup_stages.items())
+        evidence += f"待跟进需求：{stages_text}。"
     return {
         **draft.model_dump(), "evidence": evidence, "snapshot": snapshot,
+        "followups": campaign["followups"],
         "createdAt": datetime.now(SHANGHAI).date().isoformat(),
     }

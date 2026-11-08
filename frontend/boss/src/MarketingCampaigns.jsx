@@ -23,6 +23,7 @@ const statusLabel = campaign => campaign.status === 'published' && campaign.publ
   ? '已模拟发布' : statusLabels[campaign.status];
 const stageFields = [['inquiries', '有效咨询'], ['plans', '确认方案'], ['bookings', '创建预订'], ['paid', '模拟已付']];
 const metricFields = [['views', '累计浏览'], ['likes', '累计点赞'], ['comments', '累计评论']];
+const planAreas = [['acquisition', '找新客户'], ['follow_up', '跟进已有咨询'], ['operations', '持续经营']];
 const dateInShanghai = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', dateStyle: 'short' });
 const shortDate = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'long', day: 'numeric' });
 const percent = new Intl.NumberFormat('zh-CN', { style: 'percent', maximumFractionDigits: 1 });
@@ -59,7 +60,7 @@ function CampaignForm({ values, setValues, formRef, onCreate, disabled, generati
   return <section ref={formRef} tabIndex={-1} className="feature-card marketing-panel marketing-creation"
     aria-labelledby="marketing-form-title">
     <h2 id="marketing-form-title">创建营销任务</h2>
-    {adopted && <p className="marketing-prefill" role="status">已带入复盘建议。确认后点击「生成营销方案」。</p>}
+    {adopted && <p className="marketing-prefill" role="status">已带入获客建议。确认后点击「生成营销方案」。</p>}
     <form className="feature-form" onSubmit={submit}>
       {draftFields.map(({ name, label, customLabel, example, options }) => <React.Fragment key={name}>
         <label>{label}<select name={name} value={values[name].choice} disabled={generating} onChange={event => update(name, { choice: event.target.value })}>
@@ -96,6 +97,32 @@ function MetricsForm({ snapshots, onSave, pending }) {
 function MetricsList({ fields, values }) {
   return <dl className="marketing-metrics">{fields.map(([key, label]) =>
     <div key={key}><dt>{label}</dt><dd>{values[key]?.toLocaleString('zh-CN') ?? '未录入'}</dd></div>)}</dl>;
+}
+
+function AcquisitionPlan({ review }) {
+  return <div className="marketing-review">
+    <h4>{review.title}</h4>
+    <p>{review.body}</p>
+    {review.limitations && <p className="marketing-muted">判断边界 · {review.limitations}</p>}
+    {review.actions ? <div className="marketing-plan">{planAreas.map(([key, label]) => {
+      const action = review.actions[key];
+      return <section key={key} className="marketing-plan-action" aria-label={label}>
+        <h5>{label}</h5>
+        <dl className="marketing-plan-fields">
+          <div><dt>做什么</dt><dd>{action.what}</dd></div>
+          <div><dt>谁来做</dt><dd>{action.owner}</dd></div>
+          <div><dt>怎么判断结果</dt><dd>{action.success_metric}</dd></div>
+        </dl>
+        {key === 'follow_up' && Boolean(review.followups?.length) && <ul className="marketing-followups">
+          {review.followups.map(({ id, title, stage }) => <li key={id}>
+            <a href={'#/orders/' + encodeURIComponent('case:' + id)}>{title}</a>
+            <span className="marketing-muted"> · {stage}</span>
+          </li>)}
+        </ul>}
+      </section>;
+    })}</div> : <p className="marketing-muted">这是已保存的复盘。重新生成可获取下一轮获客计划。</p>}
+    <details><summary>查看数据依据</summary><p className="marketing-muted">{review.evidence}</p></details>
+  </div>;
 }
 
 function CampaignDetails({ campaign, save, pending, onAdopt }) {
@@ -168,16 +195,13 @@ function CampaignDetails({ campaign, save, pending, onAdopt }) {
           onClick={() => setEditingMetrics(open => !open)}>{editingMetrics ? '收起录入' : '录入平台数据'}</button></div>
         {editingMetrics && <MetricsForm snapshots={metrics} onSave={saveMetrics} pending={pending} />}
       </section>
-      <section className="marketing-section" aria-label="营销复盘">
-        <div className="marketing-heading"><h3>营销复盘</h3><span className="marketing-muted">{review ? `生成于 ${formatMarketingDate(review.createdAt)}` : '待生成'}</span></div>
-        {review && <div className="marketing-review"><strong>{review.title}</strong><p>{review.body}</p>
-          {review.limitations && <p className="marketing-muted">判断边界 · {review.limitations}</p>}
-          <details><summary>查看数据依据</summary><p className="marketing-muted">{review.evidence}</p></details>
-        </div>}
+      <section className="marketing-section" aria-label="下一轮获客计划">
+        <div className="marketing-heading"><h3>下一轮获客计划</h3><span className="marketing-muted">{review ? `生成于 ${formatMarketingDate(review.createdAt)}` : '待生成'}</span></div>
+        {review && <AcquisitionPlan review={review} />}
         <div className="connected-actions marketing-actions">
           <button className={`btn ${review ? 'outline' : 'primary'}`} disabled={Boolean(pending)}
-            onClick={() => submit('analyze', {}, '已生成营销复盘。')}>
-            {pending === 'analyze' ? '正在生成复盘…' : review ? '重新生成复盘' : '生成复盘'}
+            onClick={() => submit('analyze', {}, '已生成下一轮获客计划。')}>
+            {pending === 'analyze' ? '正在生成获客计划…' : review ? '重新生成获客计划' : '生成获客计划'}
           </button>
           {review && <button className="btn primary" disabled={Boolean(pending)} onClick={() => onAdopt(campaign)}>用此建议创建活动</button>}
         </div>

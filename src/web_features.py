@@ -79,7 +79,7 @@ def register_owner_features(app, require_owner):
         try:
             return asyncio.run(marketing.analyze(campaign_id, payload))
         except (AgentConfigurationError, AgentOutputError) as exc:
-            raise HTTPException(502, "营销复盘未生成。请检查模型服务后重试。") from exc
+            raise HTTPException(502, "获客计划未生成。请检查模型服务后重试。") from exc
 
     @app.get("/api/owner/archive", dependencies=protected)
     def archive():

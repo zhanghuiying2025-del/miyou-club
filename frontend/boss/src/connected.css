@@ -59,6 +59,14 @@
 .marketing-campaign-option { display: grid; gap: 4px; width: 100%; text-align: left; padding: 9px 12px; border: 1px solid #dddcd0; border-radius: 8px; }
 .marketing-campaign-option[aria-pressed='true'] { background: var(--pale); border-color: #a5ba94; }
 .marketing-draft, .marketing-review { margin-top: 12px; padding: 12px; border-radius: 8px; background: var(--pale); white-space: pre-wrap; }
+.marketing-plan { display: grid; gap: 8px; margin-top: 12px; }
+.marketing-plan-action { padding: 12px; border-radius: 8px; background: #fff; }
+.marketing-plan-action h5 { margin: 0; font-size: .95rem; }
+.marketing-plan-action .marketing-plan-fields { margin: 8px 0 0; }
+.marketing-plan-action .marketing-plan-fields > div { display: grid; grid-template-columns: 7em minmax(0, 1fr); gap: 4px 8px; }
+.marketing-plan-fields dt { color: #62695d; }
+.marketing-followups { margin: 8px 0 0; padding-left: 1.2em; }
+.marketing-followups a { color: var(--deep); }
 .marketing-link { display: block; width: 100%; min-width: 0; margin: 6px 0; padding: 8px; font: inherit; border: 1px solid #a2ab91; border-radius: 8px; }
 .marketing-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
 .marketing-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -73,4 +81,7 @@
 }
 @media (max-width: 850px) {
   .marketing-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+  .marketing-plan-action .marketing-plan-fields > div { grid-template-columns: minmax(0, 1fr); }
 }
